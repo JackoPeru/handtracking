@@ -33,18 +33,14 @@ from handtracking_processing import (
     update_spock_state,
     update_swipe_pose,
 )
+from handtracking_scroll import update_scroll_state
 from handtracking_config import *
 from handtracking_gestures import (
-    clamp,
     control_point,
-    is_open_hand,
-    is_volume_release_pose,
     normalized_pinch_ratio,
-    palm_roll_angle,
     spock_all_fingers_up,
     spock_pose_score,
     two_hand_geometry,
-    wrapped_angle_delta,
 )
 from handtracking_render import draw_runtime_overlays
 from handtracking_session import RuntimeSession
@@ -53,6 +49,7 @@ from handtracking_tracking import (
     expire_lost_flow,
     handle_missing_hands,
 )
+from handtracking_volume import update_volume_state
 from handtracking_windows import (
     ctrl_wheel,
     execute_radial_action,
@@ -475,122 +472,39 @@ def _run_impl(session):
                     radial.reset()
                     swipe.tracking = False
                 else:
-                    if not volume.active:
-                        dedicated_mode_block = (
-                            pointer.pinch_held or
-                            two_hand.active or two_hand.candidate_at is not None or
-                            radial.active or swipe.tracking
-                        )
-                        if dedicated_mode_block:
-                            volume.candidate_at = None
-                            volume.candidate_last_seen = None
-                            volume.vote_history.clear()
-                        elif volume_gesture_now or volume_candidate_now:
-                            if volume.candidate_at is None:
-                                volume.candidate_at = now
-                            volume.candidate_last_seen = now
-                            if (volume_gesture_now and
-                                    now - volume.candidate_at >= VOLUME_CONFIRM_SECONDS):
-                                volume.active = True
-                                volume.candidate_last_seen = None
-                                volume.release_at = None
-                                volume.pose_lost_at = None
-                                volume.last_angle = palm_roll_angle(control_hand)
-                                volume.delta_history.clear()
-                                volume.level = get_system_volume()
-                                scroll.reset()
-                                cursor.sync(False)
-                                flow.clear_motion()
-                        elif volume.candidate_at is not None:
-                            # Un singolo frame incerto non annulla l'aggancio e non lascia
-                            # partire click/pugno/scroll nello stesso istante.
-                            if (volume.candidate_last_seen is None or
-                                    now - volume.candidate_last_seen > VOLUME_ENTRY_MISS_GRACE):
-                                volume.candidate_at = None
-                                volume.candidate_last_seen = None
-                    else:
-                        # VOLUME LOCK: appena la mano mostra una chiara apertura,
-                        # congela SUBITO il volume. La conferma temporale serve solo
-                        # a decidere quando uscire definitivamente dalla modalita'.
-                        release_pose = is_volume_release_pose(control_class_hand)
-                        fully_open = is_open_hand(control_class_hand)
-                        if fist_pending:
-                            # Due frame compatti consecutivi: congela il volume ma
-                            # aspetta il voto successivo prima di dichiarare PUGNO.
-                            volume.pose_lost_at = None
-                            volume.release_at = None
-                            volume.last_angle = None
-                            volume.delta_history.clear()
-                        elif release_pose or fully_open:
-                            volume.pose_lost_at = None
-                            if volume.release_at is None:
-                                volume.release_at = now
-                            # Nessuna rotazione viene letta durante il rilascio.
-                            volume.last_angle = None
-                            volume.delta_history.clear()
-                            if now - volume.release_at >= VOLUME_RELEASE_GRACE:
-                                volume.reset()
-                                cursor.sync(True)
-                                flow.clear_motion()
-                        elif debug_volume_score < VOLUME_HOLD_MIN_SCORE:
-                            # La posa non e' piu' credibile: congela immediatamente
-                            # il volume e aspetta una breve grazia prima di sganciare.
-                            volume.release_at = None
-                            if volume.pose_lost_at is None:
-                                volume.pose_lost_at = now
-                            volume.last_angle = None
-                            volume.delta_history.clear()
-                            if now - volume.pose_lost_at >= VOLUME_POSE_LOSS_GRACE:
-                                volume.reset()
-                                cursor.sync(True)
-                                flow.clear_motion()
-                        else:
-                            volume.release_at = None
-                            volume.pose_lost_at = None
-                            angle = palm_roll_angle(control_hand)
-                            if volume.last_angle is None:
-                                # Dopo un falso rilascio/rientro, questo frame diventa
-                                # il nuovo zero: niente salto di volume.
-                                volume.last_angle = angle
-                                volume.delta_history.clear()
-                            else:
-                                raw_delta = wrapped_angle_delta(angle, volume.last_angle)
-                                volume.last_angle = angle
-                                raw_delta = clamp(raw_delta, -VOLUME_MAX_DELTA_RAD, VOLUME_MAX_DELTA_RAD)
-                                volume.delta_history.append(raw_delta)
-                                stable_delta = sorted(volume.delta_history)[len(volume.delta_history) // 2]
-                                if abs(stable_delta) >= VOLUME_DEADZONE_RAD:
-                                    volume.level = clamp(
-                                        volume.level + stable_delta * VOLUME_GAIN * VOLUME_DIRECTION,
-                                        0.0, 1.0,
-                                    )
-                                    set_system_volume(volume.level)
-
-                    if (pointer.pinch_held or volume.active or two_hand.active or radial.active or
-                            swipe.tracking or two_hand.candidate_at is not None):
-                        scroll.reset()
-                    elif not scroll.active:
-                        if scroll_gesture_now:
-                            if scroll.candidate_at is None:
-                                scroll.candidate_at = now
-                            elif now - scroll.candidate_at >= SCROLL_CONFIRM_SECONDS:
-                                scroll.active = True
-                                scroll.release_at = None
-                                scroll.residual = 0.0
-                                cursor.sync(False)
-                                flow.clear_motion()
-                        else:
-                            scroll.candidate_at = None
-                    else:
-                        if scroll_gesture_now:
-                            scroll.release_at = None
-                        else:
-                            if scroll.release_at is None:
-                                scroll.release_at = now
-                            elif now - scroll.release_at >= SCROLL_RELEASE_GRACE:
-                                scroll.reset()
-                                cursor.sync(True)
-                                flow.clear_motion()
+                    dedicated_mode_block = (
+                        pointer.pinch_held or
+                        two_hand.active or two_hand.candidate_at is not None or
+                        radial.active or swipe.tracking
+                    )
+                    update_volume_state(
+                        volume,
+                        now=now,
+                        dedicated_mode_block=dedicated_mode_block,
+                        volume_gesture_now=volume_gesture_now,
+                        volume_candidate_now=volume_candidate_now,
+                        control_hand=control_hand,
+                        control_class_hand=control_class_hand,
+                        fist_pending=fist_pending,
+                        debug_volume_score=debug_volume_score,
+                        scroll=scroll,
+                        cursor=cursor,
+                        flow=flow,
+                        get_volume_cb=get_system_volume,
+                        set_volume_cb=set_system_volume,
+                    )
+                    update_scroll_state(
+                        scroll,
+                        now=now,
+                        gesture_now=scroll_gesture_now,
+                        blocked=(
+                            pointer.pinch_held or volume.active or
+                            two_hand.active or radial.active or swipe.tracking or
+                            two_hand.candidate_at is not None
+                        ),
+                        cursor=cursor,
+                        flow=flow,
+                    )
 
                 if paused_by_fist or not commands_enabled or spock.blocking:
                     cursor.sync(False)
