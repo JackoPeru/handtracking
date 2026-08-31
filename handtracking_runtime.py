@@ -48,6 +48,11 @@ from handtracking_gestures import (
 )
 from handtracking_render import draw_runtime_overlays
 from handtracking_session import RuntimeSession
+from handtracking_tracking import (
+    apply_stale_fail_safe,
+    expire_lost_flow,
+    handle_missing_hands,
+)
 from handtracking_windows import (
     ctrl_wheel,
     execute_radial_action,
@@ -151,39 +156,32 @@ def _run_impl(session):
         )
 
         if mp_result_stale:
-            spock.release_required = spock.release_required or spock.latched
-            spock.reset(preserve_release_required=True)
-            paused_by_fist = False
-            fist_vote_history.clear()
-            volume.reset()
-            scroll.reset()
-            two_hand.reset()
-            radial.reset()
-            swipe.cancel_tracking()
-            pointer.reset(preserve_last_click=True)
-            mp_control_ref = None
-            control_handedness = None
-            flow.points = None
-            flow.active = False
-            flow.clear_motion()
-            latest_result = None
-            fist_states = []
-            debug_fist_score = 0.0
-            debug_volume_score = 0.0
-            debug_grip_gap = 0.0
-            debug_fist_folded = 0
-            debug_fist_tightness = 2.0
-            debug_strong_fist = False
-            spock.debug_score = 0.0
-            spock.debug_stable_score = 0.0
-            swipe.debug_score = 0.0
-            swipe.debug_stable = 0.0
-            swipe.debug_gap = 9.0
-            swipe.debug_extended = 0
-            snap_anchor = None
-            snap_started_at = None
-            precision_snap_active = False
-            cursor.sync(False)
+            stale = apply_stale_fail_safe(
+                spock=spock,
+                fist_vote_history=fist_vote_history,
+                volume=volume,
+                scroll=scroll,
+                two_hand=two_hand,
+                radial=radial,
+                swipe=swipe,
+                pointer=pointer,
+                flow=flow,
+                cursor=cursor,
+            )
+            paused_by_fist = stale.paused_by_fist
+            mp_control_ref = stale.mp_control_ref
+            control_handedness = stale.control_handedness
+            latest_result = stale.latest_result
+            fist_states = stale.fist_states
+            debug_fist_score = stale.debug_fist_score
+            debug_volume_score = stale.debug_volume_score
+            debug_grip_gap = stale.debug_grip_gap
+            debug_fist_folded = stale.debug_fist_folded
+            debug_fist_tightness = stale.debug_fist_tightness
+            debug_strong_fist = stale.debug_strong_fist
+            snap_anchor = stale.snap_anchor
+            snap_started_at = stale.snap_started_at
+            precision_snap_active = stale.precision_snap_active
 
         # Optical flow: misura il movimento su ogni frame della webcam.
         flow_motion = measure_optical_flow(
@@ -677,39 +675,29 @@ def _run_impl(session):
                     spock.score_history.clear()
                     spock.debug_stable_score = 0.0
 
-                fist_states = []
-
-                # Il vecchio grace di 280 ms e' utile per non perdere lo stato delle
-                # gesture, ma e' troppo lungo per un cursore: se la mano sparisce,
-                # LK puo' iniziare a seguire lo sfondo. Congela quindi il puntatore
-                # dopo circa due frame e lo riancora quando MediaPipe rivede la mano.
-                if (pointer.move_active and
-                        now - last_hand_seen > POINTER_TRACKING_LOSS_GRACE):
-                    cursor.sync(False)
-                    flow.points = None
-                    flow.active = False
-                    flow.clear_motion()
-
-                loss_grace = VOLUME_TRACKING_LOSS_GRACE if volume.active else TRACKING_LOSS_GRACE
-                if now - last_hand_seen > loss_grace:
-                    paused_by_fist = False
-                    volume.reset()
-                    fist_vote_history.clear()
-                    scroll.reset()
-                    two_hand.reset()
-                    radial.reset()
-                    swipe.cancel_tracking()
-                    pointer.reset(preserve_last_click=True)
-                    gesture_input_block_until = 0.0
-                    mp_control_ref = None
-                    control_handedness = None
-                    flow.points = None
-                    flow.active = False
-                    flow.clear_motion()
-                    cursor.sync(False)
-        # Se l'optical flow perde i punti, MediaPipe li riaggancia al prossimo risultato valido.
-        if not flow.active and now - flow.last_success > TRACKING_LOSS_GRACE:
-            flow.points = None
+                missing = handle_missing_hands(
+                    now=now,
+                    last_hand_seen=last_hand_seen,
+                    pointer=pointer,
+                    volume=volume,
+                    scroll=scroll,
+                    two_hand=two_hand,
+                    radial=radial,
+                    swipe=swipe,
+                    flow=flow,
+                    cursor=cursor,
+                    fist_vote_history=fist_vote_history,
+                    paused_by_fist=paused_by_fist,
+                    gesture_input_block_until=gesture_input_block_until,
+                    mp_control_ref=mp_control_ref,
+                    control_handedness=control_handedness,
+                )
+                paused_by_fist = missing.paused_by_fist
+                gesture_input_block_until = missing.gesture_input_block_until
+                mp_control_ref = missing.mp_control_ref
+                control_handedness = missing.control_handedness
+                fist_states = missing.fist_states
+        expire_lost_flow(flow, now=now)
 
         # Precision snap: quando il cursore resta stabile lo trattiene leggermente.
         snap_allowed = (
