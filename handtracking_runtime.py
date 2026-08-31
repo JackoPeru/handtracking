@@ -5,6 +5,7 @@ import math
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 import cv2
 import mediapipe as mp
@@ -13,11 +14,16 @@ from pycaw.pycaw import AudioUtilities
 
 from handtracking_core import (
     advance_confirmed_hold,
+    choose_camera_target_fps,
     choose_control_index,
+    fist_evidence_from_hands,
     normalize_flow_delta,
+    normalized_points_pixel_distance,
     palm_motion_scale,
     pointer_mode_allowed,
+    tracking_result_is_stale,
 )
+from handtracking_mediapipe import MediaPipeWorker
 
 # L'optical flow usa pochissimi punti e non beneficia di 8 thread OpenCV.
 # Limitarlo evita contesa CPU con MediaPipe/XNNPACK sul portatile 4C/8T.
@@ -285,17 +291,6 @@ def wrapped_angle_delta(current, previous):
     return math.atan2(math.sin(current - previous), math.cos(current - previous))
 
 
-def wrapped_line_angle_delta(current, previous):
-    # Una linea tra due mani non ha verso: 0Â° e 180Â° rappresentano la stessa
-    # configurazione. Evita quindi salti di ~180Â° quando le mani si incrociano.
-    delta = wrapped_angle_delta(current, previous)
-    if delta > math.pi / 2:
-        delta -= math.pi
-    elif delta < -math.pi / 2:
-        delta += math.pi
-    return delta
-
-
 def normalized_pinch_ratio(hand, finger_tip=8):
     scale = max(dist(hand[0], hand[9]), 0.001)
     return dist(hand[4], hand[finger_tip]) / scale
@@ -388,7 +383,7 @@ def two_hand_geometry(hand_a, hand_b):
     ax, ay = control_point(hand_a)
     bx, by = control_point(hand_b)
     dx, dy = bx - ax, by - ay
-    return math.hypot(dx, dy), math.atan2(dy, dx), (ax, ay), (bx, by)
+    return math.hypot(dx, dy), (ax, ay), (bx, by)
 
 
 def is_radial_open_pose(hand):
@@ -698,7 +693,7 @@ def draw_radial_menu(frame, center, selected):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
 
-def draw_two_hand_transform(frame, point_a, point_b, rotation_deg):
+def draw_two_hand_transform(frame, point_a, point_b):
     h, w = frame.shape[:2]
     a = (int(point_a[0] * w), int(point_a[1] * h))
     b = (int(point_b[0] * w), int(point_b[1] * h))
@@ -706,7 +701,7 @@ def draw_two_hand_transform(frame, point_a, point_b, rotation_deg):
     cv2.circle(frame, a, 14, (255, 255, 0), 3, cv2.LINE_AA)
     cv2.circle(frame, b, 14, (255, 255, 0), 3, cv2.LINE_AA)
     mx, my = (a[0] + b[0]) // 2, (a[1] + b[1]) // 2
-    cv2.putText(frame, f"ROT {rotation_deg:+.0f} deg", (mx - 70, my - 16),
+    cv2.putText(frame, "ZOOM", (mx - 42, my - 16),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2, cv2.LINE_AA)
 
 
@@ -735,8 +730,10 @@ def propagate_points(old_gray, new_gray, points):
     return new_pts
 
 
+MODEL_PATH = Path(__file__).with_name("hand_landmarker.task")
+
 options = HandLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path="hand_landmarker.task"),
+    base_options=BaseOptions(model_asset_path=str(MODEL_PATH)),
     running_mode=VisionRunningMode.VIDEO,
     num_hands=2,
     min_hand_detection_confidence=0.5,
@@ -879,14 +876,8 @@ TWO_HAND_DISTANCE_DEADZONE = 0.0020
 TWO_HAND_MAX_DISTANCE_DELTA = 0.055
 TWO_HAND_ZOOM_GAIN = 2600.0
 TWO_HAND_WHEEL_STEP = 120.0
-TWO_HAND_ROTATION_HISTORY = 3
-TWO_HAND_ROTATION_DEADZONE_DEG = 0.65
-TWO_HAND_MAX_ROTATION_DELTA_DEG = 12.0
-TWO_HAND_ROTATE_STEP_DEG = 12.0
-# Rotazione: rilevata sempre. Lascia None per non imporre shortcut non universali.
-TWO_HAND_ROTATE_LEFT_VK = None
-TWO_HAND_ROTATE_RIGHT_VK = None
 GESTURE_EVENT_SHOW_SECONDS = 0.85
+MP_RESULT_STALE_SECONDS = 0.22
 
 # Spock toggle: arma/disarma tutti i comandi senza fermare tracking e camera.
 SPOCK_HOLD_SECONDS = 1.00
@@ -926,7 +917,9 @@ SPOCK_CENTER_RATIO_MIN = 1.12
 SPOCK_CENTER_RATIO_GOOD = 1.85
 SPOCK_CENTER_RATIO_CLEAR = 1.34
 
-with HandLandmarker.create_from_options(options) as landmarker:
+def run():
+    global cursor_stop
+    cursor_stop = False
     cap = cv2.VideoCapture(0, cv2.CAP_MSMF)
     if not cap.isOpened():
         cap.release()
@@ -945,62 +938,24 @@ with HandLandmarker.create_from_options(options) as landmarker:
     camera_codec = "".join(
         chr((reported_fourcc >> (8 * i)) & 0xFF) for i in range(4)
     ).replace("\x00", "") or "?"
-    camera_target_fps = TARGET_FPS if reported_fps >= 50 else FALLBACK_FPS
-    if camera_target_fps == FALLBACK_FPS:
-        cap.set(cv2.CAP_PROP_FPS, FALLBACK_FPS)
+    camera_target_fps = choose_camera_target_fps(
+        reported_fps, TARGET_FPS, FALLBACK_FPS,
+    )
     cv2.namedWindow("Hands", cv2.WINDOW_NORMAL)
     cv2.setWindowProperty("Hands", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-    mp_lock = threading.Lock()
-    mp_pending = None
-    mp_latest = None
-    mp_seq = 0
-    mp_input_seq = 0
-    mp_overwrites = 0
-    mp_error_count = 0
-    mp_last_error = ""
-    mp_stop = False
     start_time = time.perf_counter()
 
-    def mp_worker():
-        global mp_pending, mp_latest, mp_seq, mp_stop, mp_error_count, mp_last_error
-        last_ts = -1
-        last_completed_at = None
-        while not mp_stop:
-            packet = None
-            with mp_lock:
-                if mp_pending is not None:
-                    packet = mp_pending
-                    mp_pending = None
-            if packet is None:
-                time.sleep(0.001)
-                continue
-            bgr, gray, ts, enqueued_at = packet
-            worker_started = time.perf_counter()
-            queue_ms = (worker_started - enqueued_at) * 1000.0
-            ts = max(ts, last_ts + 1)
-            last_ts = ts
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            infer_started = time.perf_counter()
-            try:
-                res = landmarker.detect_for_video(image, ts)
-            except Exception as exc:
-                with mp_lock:
-                    mp_error_count += 1
-                    mp_last_error = f"{type(exc).__name__}: {exc}"[:140]
-                time.sleep(0.005)
-                continue
-            completed_at = time.perf_counter()
-            infer_ms = (completed_at - infer_started) * 1000.0
-            worker_ms = (completed_at - worker_started) * 1000.0
-            cycle_ms = 0.0 if last_completed_at is None else (completed_at - last_completed_at) * 1000.0
-            last_completed_at = completed_at
-            with mp_lock:
-                mp_seq += 1
-                mp_latest = (mp_seq, res, gray, infer_ms, worker_ms, cycle_ms, queue_ms)
-    inference_thread = threading.Thread(target=mp_worker, daemon=True)
-    inference_thread.start()
+    def build_mediapipe_image(bgr):
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+    mp_worker = MediaPipeWorker(
+        factory=HandLandmarker,
+        options=options,
+        image_builder=build_mediapipe_image,
+    )
+    mp_worker.start()
     sync_cursor_target(False)
     cursor_thread = threading.Thread(target=cursor_worker, daemon=True)
     cursor_thread.start()
@@ -1074,12 +1029,8 @@ with HandLandmarker.create_from_options(options) as landmarker:
     two_hand_active = False
     two_hand_release_at = None
     two_hand_last_distance = None
-    two_hand_last_angle = None
     two_hand_distance_history = deque(maxlen=TWO_HAND_DISTANCE_HISTORY)
-    two_hand_rotation_history = deque(maxlen=TWO_HAND_ROTATION_HISTORY)
     two_hand_zoom_residual = 0.0
-    two_hand_rotation_total = 0.0
-    two_hand_rotation_residual = 0.0
     two_hand_points = None
 
     # Gate globale dei comandi. Il tracking resta sempre acceso.
@@ -1134,14 +1085,100 @@ with HandLandmarker.create_from_options(options) as landmarker:
         gray = cv2.cvtColor(detect_frame, cv2.COLOR_BGR2GRAY)
 
         ts = int((now - start_time) * 1000)
-        with mp_lock:
-            mp_input_seq += 1
-            if mp_pending is not None:
-                mp_overwrites += 1
-            # resize/cvtColor allocano array nuovi a ogni frame: il worker puo'
-            # mantenere questi riferimenti senza costose copie aggiuntive.
-            mp_pending = (detect_frame, gray, ts, now)
-            packet = mp_latest
+        # resize/cvtColor allocano array nuovi a ogni frame: il worker puo'
+        # mantenere questi riferimenti senza costose copie aggiuntive.
+        mp_worker.submit(detect_frame, gray, ts, now)
+        packet = mp_worker.snapshot()
+        mp_stats = mp_worker.stats()
+        mp_input_seq = mp_stats["input_seq"]
+        mp_overwrites = mp_stats["overwrites"]
+        mp_error_count = mp_stats["error_count"]
+        mp_last_error = mp_stats["last_error"]
+        mp_result_stale = tracking_result_is_stale(
+            mp_stats["last_result_input_at"], now, MP_RESULT_STALE_SECONDS,
+        )
+
+        if mp_result_stale:
+            spock_candidate_at = None
+            spock_last_seen = None
+            spock_release_at = None
+            spock_latched = False
+            spock_blocking = False
+            spock_progress = 0.0
+            spock_confirmed_seconds = 0.0
+            spock_score_history.clear()
+            spock_upright_invalid_frames = 0
+            paused_by_fist = False
+            fist_vote_history.clear()
+            volume_active = False
+            volume_candidate_at = None
+            volume_candidate_last_seen = None
+            volume_release_at = None
+            volume_pose_lost_at = None
+            volume_last_angle = None
+            volume_delta_history.clear()
+            volume_vote_history.clear()
+            scroll_active = False
+            scroll_candidate_at = None
+            scroll_release_at = None
+            scroll_residual = 0.0
+            two_hand_active = False
+            two_hand_candidate_at = None
+            two_hand_release_at = None
+            two_hand_last_distance = None
+            two_hand_distance_history.clear()
+            two_hand_zoom_residual = 0.0
+            two_hand_points = None
+            radial_active = False
+            radial_candidate_at = None
+            radial_anchor = None
+            radial_center = None
+            radial_selected = None
+            radial_selection_candidate = None
+            radial_selection_since = None
+            radial_release_at = None
+            radial_pinch_latched = False
+            radial_pinch_candidate_at = None
+            swipe_tracking = False
+            swipe_flow_started_at = None
+            swipe_flow_accum_x = 0.0
+            swipe_flow_accum_y = 0.0
+            swipe_pose_last_seen = None
+            pointer_pinch_held = False
+            pointer_move_active = False
+            pointer_pinch_started_at = None
+            pointer_release_at = None
+            pointer_release_braking = False
+            pointer_motion_accum[:] = 0.0
+            pointer_flow_travel = 0.0
+            pointer_cursor_origin = None
+            mp_control_ref = None
+            control_handedness = None
+            flow_points = None
+            flow_active = False
+            flow_virtual[:] = 0.0
+            flow_filtered[:] = 0.0
+            flow_prev_filtered[:] = 0.0
+            flow_time = None
+            latest_result = None
+            fist_states = []
+            scroll_states = []
+            debug_fist_score = 0.0
+            debug_volume_score = 0.0
+            debug_grip_gap = 0.0
+            debug_fist_folded = 0
+            debug_fist_tightness = 2.0
+            debug_strong_fist = False
+            debug_spock_score = 0.0
+            debug_spock_stable_score = 0.0
+            debug_swipe_score = 0.0
+            debug_swipe_stable = 0.0
+            debug_swipe_gap = 9.0
+            debug_swipe_extended = 0
+            snap_anchor = None
+            snap_started_at = None
+            precision_snap_active = False
+            sync_cursor_target(False)
 
         # Optical flow: misura il movimento su ogni frame della webcam.
         if flow_prev_gray is not None and flow_points is not None:
@@ -1181,7 +1218,8 @@ with HandLandmarker.create_from_options(options) as landmarker:
                         flow_points = next_pts
                         flow_active = True
                         last_flow_success = now
-                        if (not paused_by_fist and commands_enabled and not spock_blocking and
+                        if (not mp_result_stale and not paused_by_fist and
+                                commands_enabled and not spock_blocking and
                                 now >= gesture_input_block_until):
                             # Swipe dinamico al frame-rate camera. MediaPipe decide solo
                             # se la posa e' valida; il movimento viene letto dallo stesso
@@ -1522,11 +1560,8 @@ with HandLandmarker.create_from_options(options) as landmarker:
                     two_hand_candidate_at = None
                     two_hand_release_at = None
                     two_hand_last_distance = None
-                    two_hand_last_angle = None
                     two_hand_distance_history.clear()
-                    two_hand_rotation_history.clear()
                     two_hand_zoom_residual = 0.0
-                    two_hand_rotation_residual = 0.0
                     two_hand_points = None
                     radial_active = False
                     radial_candidate_at = None
@@ -1584,23 +1619,19 @@ with HandLandmarker.create_from_options(options) as landmarker:
                 )
                 selected_handedness = handedness_labels[control_index]
 
-                # Pugno e volume sono due segnali distinti. Il volume NON puo' piu'
-                # sopprimere un pugno serrato: durante VOLUME LOCK il criterio forte
-                # ha priorita' assoluta e interrompe la modalita'. Solo la mano di
-                # controllo puo' attivare il clutch globale: la seconda mano resta libera.
+                # Il pugno e' un clutch globale: qualunque mano puo' metterci in pausa,
+                # mentre VOLUME LOCK richiede comunque un pugno forte per interrompersi.
                 raw_fist_states = [is_fist(hand) for hand in hands]
                 strong_fist_states = [is_strong_fist(hand) for hand in hands]
-                strong_fist_evidence = strong_fist_states[control_index]
-                if volume_active:
-                    fist_evidence = strong_fist_evidence
-                else:
-                    fist_evidence = strong_fist_evidence or (
-                        raw_fist_states[control_index]
-                        and not (
-                            volume_scores_now[control_index] >= VOLUME_SCORE_ON
-                            and gap_scores_now[control_index] >= VOLUME_FIST_SUPPRESS_GAP
-                        )
-                    )
+                fist_evidence = fist_evidence_from_hands(
+                    raw_fists=raw_fist_states,
+                    strong_fists=strong_fist_states,
+                    volume_scores=volume_scores_now,
+                    gap_scores=gap_scores_now,
+                    volume_active=volume_active,
+                    volume_score_on=VOLUME_SCORE_ON,
+                    suppress_gap=VOLUME_FIST_SUPPRESS_GAP,
+                )
                 old_pause = paused_by_fist
                 fist_vote_history.append(1.0 if fist_evidence else 0.0)
                 fist_votes_on = sum(v > 0.5 for v in fist_vote_history)
@@ -1634,7 +1665,12 @@ with HandLandmarker.create_from_options(options) as landmarker:
                     control_handedness = selected_handedness
                 control_hand = hands[control_index]
                 control_class_hand = class_hands[control_index]
-                palm_width_px = dist(control_hand[5], control_hand[17]) * DETECTION_W
+                palm_width_px = normalized_points_pixel_distance(
+                    (control_hand[5].x, control_hand[5].y),
+                    (control_hand[17].x, control_hand[17].y),
+                    DETECTION_W,
+                    DETECTION_H,
+                )
                 target_motion_scale = palm_motion_scale(
                     palm_width_px,
                     reference_width_px=PALM_REFERENCE_WIDTH_PX,
@@ -1669,7 +1705,7 @@ with HandLandmarker.create_from_options(options) as landmarker:
                     and not fist_pending
                 )
                 fist_states = [
-                    (paused_by_fist and i == control_index and raw_fist_states[i])
+                    (paused_by_fist and raw_fist_states[i])
                     for i in range(len(hands))
                 ]
                 scroll_states = [
@@ -1706,17 +1742,13 @@ with HandLandmarker.create_from_options(options) as landmarker:
                     two_hand_release_at = None
                     if (two_hand_active or
                             now - two_hand_candidate_at >= TWO_HAND_CONFIRM_SECONDS):
-                        distance_now, angle_now, point_a, point_b = pair_geometry
+                        distance_now, point_a, point_b = pair_geometry
                         if not two_hand_active:
                             two_hand_active = True
                             two_hand_distance_history.clear()
                             two_hand_distance_history.append(distance_now)
-                            two_hand_rotation_history.clear()
                             two_hand_last_distance = distance_now
-                            two_hand_last_angle = angle_now
                             two_hand_zoom_residual = 0.0
-                            two_hand_rotation_total = 0.0
-                            two_hand_rotation_residual = 0.0
                             radial_active = False
                             radial_candidate_at = None
                             radial_release_at = None
@@ -1753,35 +1785,6 @@ with HandLandmarker.create_from_options(options) as landmarker:
                                     if zoom_steps != 0:
                                         ctrl_wheel(zoom_steps * int(TWO_HAND_WHEEL_STEP))
                                         two_hand_zoom_residual -= zoom_steps * TWO_HAND_WHEEL_STEP
-
-                            if two_hand_last_angle is not None:
-                                raw_angle_delta = math.degrees(
-                                    wrapped_line_angle_delta(angle_now, two_hand_last_angle)
-                                )
-                                two_hand_last_angle = angle_now
-                                if abs(raw_angle_delta) <= TWO_HAND_MAX_ROTATION_DELTA_DEG:
-                                    two_hand_rotation_history.append(raw_angle_delta)
-                                    stable_angle_delta = sorted(two_hand_rotation_history)[
-                                        len(two_hand_rotation_history) // 2
-                                    ]
-                                    if (len(two_hand_rotation_history) >= TWO_HAND_ROTATION_HISTORY and
-                                            abs(stable_angle_delta) >= TWO_HAND_ROTATION_DEADZONE_DEG):
-                                        two_hand_rotation_total += stable_angle_delta
-                                        two_hand_rotation_residual += stable_angle_delta
-                                        while abs(two_hand_rotation_residual) >= TWO_HAND_ROTATE_STEP_DEG:
-                                            positive = two_hand_rotation_residual > 0.0
-                                            vk = (TWO_HAND_ROTATE_RIGHT_VK if positive
-                                                  else TWO_HAND_ROTATE_LEFT_VK)
-                                            if vk is not None:
-                                                tap_combo(vk)
-                                            two_hand_rotation_residual -= math.copysign(
-                                                TWO_HAND_ROTATE_STEP_DEG,
-                                                two_hand_rotation_residual,
-                                            )
-                                else:
-                                    two_hand_rotation_history.clear()
-                            else:
-                                two_hand_last_angle = angle_now
                         two_hand_points = (point_a, point_b)
                 elif two_hand_active:
                     if two_hand_release_at is None:
@@ -1791,11 +1794,8 @@ with HandLandmarker.create_from_options(options) as landmarker:
                         two_hand_candidate_at = None
                         two_hand_release_at = None
                         two_hand_last_distance = None
-                        two_hand_last_angle = None
                         two_hand_distance_history.clear()
-                        two_hand_rotation_history.clear()
                         two_hand_zoom_residual = 0.0
-                        two_hand_rotation_residual = 0.0
                         two_hand_points = None
                         gesture_input_block_until = now + 0.16
                         sync_cursor_target(True)
@@ -2110,11 +2110,8 @@ with HandLandmarker.create_from_options(options) as landmarker:
                     two_hand_candidate_at = None
                     two_hand_release_at = None
                     two_hand_last_distance = None
-                    two_hand_last_angle = None
                     two_hand_distance_history.clear()
-                    two_hand_rotation_history.clear()
                     two_hand_zoom_residual = 0.0
-                    two_hand_rotation_residual = 0.0
                     two_hand_points = None
                     radial_active = False
                     radial_candidate_at = None
@@ -2335,6 +2332,16 @@ with HandLandmarker.create_from_options(options) as landmarker:
                             add_cursor_delta(float(dx), float(dy))
             else:
                 debug_spock_score = 0.0
+                debug_fist_score = 0.0
+                debug_volume_score = 0.0
+                debug_grip_gap = 0.0
+                debug_fist_folded = 0
+                debug_fist_tightness = 2.0
+                debug_strong_fist = False
+                debug_swipe_score = 0.0
+                debug_swipe_stable = 0.0
+                debug_swipe_gap = 9.0
+                debug_swipe_extended = 0
                 if spock_latched:
                     if spock_release_at is None:
                         spock_release_at = now
@@ -2397,12 +2404,8 @@ with HandLandmarker.create_from_options(options) as landmarker:
                     two_hand_candidate_at = None
                     two_hand_release_at = None
                     two_hand_last_distance = None
-                    two_hand_last_angle = None
                     two_hand_distance_history.clear()
-                    two_hand_rotation_history.clear()
                     two_hand_zoom_residual = 0.0
-                    two_hand_rotation_total = 0.0
-                    two_hand_rotation_residual = 0.0
                     two_hand_points = None
                     radial_active = False
                     radial_candidate_at = None
@@ -2496,20 +2499,21 @@ with HandLandmarker.create_from_options(options) as landmarker:
         if two_hand_active and two_hand_points is not None:
             draw_two_hand_transform(
                 frame, two_hand_points[0], two_hand_points[1],
-                two_hand_rotation_total,
             )
 
         fps_frames += 1
         elapsed = now - fps_window_start
         if elapsed >= 0.5:
             actual_fps = fps_frames / elapsed
+            camera_target_fps = choose_camera_target_fps(
+                actual_fps, TARGET_FPS, FALLBACK_FPS,
+            )
             fps_frames = 0
             fps_window_start = now
 
         mp_elapsed = now - mp_fps_window_start
         if mp_elapsed >= 0.5:
-            with mp_lock:
-                completed_seq = mp_seq
+            completed_seq = mp_worker.stats()["seq"]
             actual_mp_fps = (completed_seq - mp_fps_last_seq) / mp_elapsed
             mp_fps_last_seq = completed_seq
             mp_fps_window_start = now
@@ -2523,7 +2527,7 @@ with HandLandmarker.create_from_options(options) as landmarker:
         elif gesture_mode == "VOLUME":
             status = f"VOLUME: {int(round(volume_level * 100))}%"
         elif gesture_mode == "TWO_HAND":
-            status = f"2 MANI: ZOOM | ROT {two_hand_rotation_total:+.0f} deg"
+            status = "2 MANI: ZOOM"
         elif gesture_mode == "RADIAL":
             choice = radial_selected if radial_selected is not None else "CENTRO"
             status = f"MENU RADIALE: {choice} | PINCH = OK"
@@ -2619,9 +2623,13 @@ with HandLandmarker.create_from_options(options) as landmarker:
             break
 
     sync_cursor_target(False)
-    mp_stop = True
-    inference_thread.join(timeout=0.5)
+    mp_worker.stop()
+    mp_worker.join(timeout=2.0)
     cursor_stop = True
     cursor_thread.join(timeout=0.25)
     cap.release()
     cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    run()

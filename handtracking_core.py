@@ -59,3 +59,45 @@ def palm_motion_scale(palm_width_px, reference_width_px=90.0,
 def normalize_flow_delta(dx, dy, palm_scale):
     scale = max(float(palm_scale), 1e-6)
     return float(dx) / scale, float(dy) / scale
+
+
+def normalized_points_pixel_distance(point_a, point_b, frame_width, frame_height):
+    """Distance between normalized image points measured in real frame pixels."""
+    if frame_width <= 0 or frame_height <= 0:
+        raise ValueError("frame dimensions must be positive")
+    dx = (float(point_a[0]) - float(point_b[0])) * frame_width
+    dy = (float(point_a[1]) - float(point_b[1])) * frame_height
+    return math.hypot(dx, dy)
+
+
+def tracking_result_is_stale(last_success_at, now, timeout_seconds):
+    if last_success_at is None:
+        return True
+    return float(now) - float(last_success_at) > max(float(timeout_seconds), 0.0)
+
+
+def choose_camera_target_fps(reported_fps, target_fps=60, fallback_fps=30):
+    """Treat zero/unknown backend reports as unknown instead of forcing fallback."""
+    reported_fps = float(reported_fps or 0.0)
+    if reported_fps <= 1.0:
+        return int(target_fps)
+    midpoint = (float(target_fps) + float(fallback_fps)) * 0.5
+    return int(target_fps if reported_fps >= midpoint else fallback_fps)
+
+
+def fist_evidence_from_hands(*, raw_fists, strong_fists, volume_scores, gap_scores,
+                             volume_active, volume_score_on, suppress_gap):
+    count = min(len(raw_fists), len(strong_fists), len(volume_scores), len(gap_scores))
+    for index in range(count):
+        if volume_active:
+            evidence = bool(strong_fists[index])
+        else:
+            evidence = bool(strong_fists[index]) or (
+                bool(raw_fists[index]) and not (
+                    float(volume_scores[index]) >= float(volume_score_on) and
+                    float(gap_scores[index]) >= float(suppress_gap)
+                )
+            )
+        if evidence:
+            return True
+    return False

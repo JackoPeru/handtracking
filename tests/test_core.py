@@ -66,7 +66,46 @@ class CoreBehaviorTests(unittest.TestCase):
         far = core.normalize_flow_delta(1.0, 0.5, palm_scale=0.5)
         self.assertEqual(near, far)
 
+    def test_pixel_distance_uses_independent_frame_axes(self):
+        core = load_core()
+        self.assertIsNotNone(core)
+        horizontal = core.normalized_points_pixel_distance(
+            (0.25, 0.50), (0.25 + 90 / 640, 0.50), 640, 360,
+        )
+        vertical = core.normalized_points_pixel_distance(
+            (0.50, 0.25), (0.50, 0.25 + 90 / 360), 640, 360,
+        )
+        self.assertAlmostEqual(horizontal, 90.0, places=5)
+        self.assertAlmostEqual(vertical, 90.0, places=5)
+
+    def test_stale_tracking_result_triggers_fail_safe(self):
+        core = load_core()
+        self.assertIsNotNone(core)
+        self.assertFalse(core.tracking_result_is_stale(10.0, 10.09, 0.12))
+        self.assertTrue(core.tracking_result_is_stale(10.0, 10.13, 0.12))
+        self.assertTrue(core.tracking_result_is_stale(None, 10.13, 0.12))
+
+    def test_camera_target_does_not_force_30_on_unknown_report(self):
+        core = load_core()
+        self.assertIsNotNone(core)
+        self.assertEqual(core.choose_camera_target_fps(0.0, 60, 30), 60)
+        self.assertEqual(core.choose_camera_target_fps(60.0, 60, 30), 60)
+        self.assertEqual(core.choose_camera_target_fps(30.0, 60, 30), 30)
+
+    def test_any_hand_fist_can_pause(self):
+        core = load_core()
+        self.assertIsNotNone(core)
+        evidence = core.fist_evidence_from_hands(
+            raw_fists=[False, True],
+            strong_fists=[False, True],
+            volume_scores=[0.1, 0.1],
+            gap_scores=[0.2, 0.2],
+            volume_active=False,
+            volume_score_on=0.52,
+            suppress_gap=0.54,
+        )
+        self.assertTrue(evidence)
+
 
 if __name__ == "__main__":
     unittest.main()
-

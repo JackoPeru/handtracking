@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "handtracking_runtime.py").read_text(encoding="utf-8")
+WORKER_SOURCE = (ROOT / "handtracking_mediapipe.py").read_text(encoding="utf-8")
 
 
 class SourceContractTests(unittest.TestCase):
@@ -17,6 +18,7 @@ class SourceContractTests(unittest.TestCase):
     def test_camera_requests_mjpeg(self):
         self.assertIn("CAP_PROP_FOURCC", SOURCE)
         self.assertIn("MJPG", SOURCE)
+        self.assertNotIn("cap.set(cv2.CAP_PROP_FPS, FALLBACK_FPS)", SOURCE)
 
     def test_camera_failure_is_explicit(self):
         self.assertIn('raise RuntimeError("Impossibile aprire la webcam")', SOURCE)
@@ -28,7 +30,7 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn("MP ERR", SOURCE)
 
     def test_mediapipe_errors_are_observable(self):
-        self.assertRegex(SOURCE, r"except Exception as \w+")
+        self.assertRegex(WORKER_SOURCE, r"except Exception as \w+")
         self.assertIn("mp_error_count", SOURCE)
         self.assertIn("mp_last_error", SOURCE)
 
@@ -72,6 +74,24 @@ class SourceContractTests(unittest.TestCase):
     def test_precision_snap_does_not_use_obsolete_dwell_names(self):
         self.assertNotIn("DWELL_RADIUS_PX", SOURCE)
         self.assertNotIn("dwell assistito", SOURCE)
+
+    def test_model_path_is_resolved_from_runtime_file(self):
+        self.assertIn("Path(__file__)", SOURCE)
+        self.assertNotIn('model_asset_path="hand_landmarker.task"', SOURCE)
+
+    def test_runtime_has_stale_mediapipe_fail_safe(self):
+        self.assertIn("MP_RESULT_STALE_SECONDS", SOURCE)
+        self.assertIn("tracking_result_is_stale", SOURCE)
+
+    def test_landmarker_is_owned_by_worker_module(self):
+        self.assertTrue((ROOT / "handtracking_mediapipe.py").exists())
+        self.assertNotIn("def mp_worker", SOURCE)
+        self.assertNotIn("with HandLandmarker.create_from_options", SOURCE)
+
+    def test_two_hand_mode_does_not_advertise_unimplemented_rotation(self):
+        self.assertNotIn("TWO_HAND_ROTATE_LEFT_VK", SOURCE)
+        self.assertNotIn("TWO_HAND_ROTATE_RIGHT_VK", SOURCE)
+        self.assertNotIn("ROT {", SOURCE)
 
 
 if __name__ == "__main__":
