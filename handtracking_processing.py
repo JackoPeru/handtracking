@@ -1,10 +1,11 @@
 """Semi-pure MediaPipe result processing helpers."""
 
 from dataclasses import dataclass
+import math
 
 from handtracking_config import *
 from handtracking_core import advance_confirmed_hold, spock_release_gate_active
-from handtracking_gestures import clamp
+from handtracking_gestures import clamp, swipe_pose_metrics
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,13 @@ class SpockUpdate:
     event: str | None
     event_until: float | None
     input_block_until: float
+
+
+@dataclass(frozen=True)
+class SnapUpdate:
+    active: bool
+    anchor: tuple[float, float] | None
+    started_at: float | None
 
 
 def update_ema_metrics(current, sample):
@@ -32,6 +40,46 @@ def update_ema_metrics(current, sample):
             cycle = cycle * 0.85 + sample_cycle * 0.15
     queue = queue * 0.85 + sample_queue * 0.15
     return infer, worker, cycle, queue
+
+
+def update_swipe_pose(swipe, *, allowed, control_hand, now, score_fn=swipe_pose_metrics):
+    if allowed:
+        (swipe.debug_score, swipe.debug_gap,
+         swipe.debug_extended) = score_fn(control_hand)
+        swipe.pose_history.append(swipe.debug_score)
+        best_scores = sorted(swipe.pose_history, reverse=True)[:SWIPE_POSE_KEEP_BEST]
+        swipe.debug_stable = sum(best_scores) / max(len(best_scores), 1)
+        if (swipe.debug_score >= SWIPE_POSE_SCORE_ON or
+                swipe.debug_stable >= SWIPE_POSE_SCORE_ON):
+            swipe.pose_last_seen = now
+        elif swipe.tracking and swipe.debug_score >= SWIPE_POSE_SCORE_HOLD:
+            swipe.pose_last_seen = now
+    else:
+        swipe.debug_score = 0.0
+        swipe.debug_stable = 0.0
+        swipe.debug_gap = 9.0
+        swipe.debug_extended = 0
+        swipe.pose_history.clear()
+        swipe.pose_last_seen = None
+
+
+def update_precision_snap(*, allowed, cursor_position, now, active, anchor, started_at):
+    if not allowed:
+        return SnapUpdate(False, None, None)
+
+    cursor_x, cursor_y = cursor_position
+    if anchor is None or started_at is None:
+        return SnapUpdate(False, (float(cursor_x), float(cursor_y)), now)
+
+    snap_drift = math.hypot(cursor_x - anchor[0], cursor_y - anchor[1])
+    allowed_radius = SNAP_HOLD_RADIUS_PX if active else SNAP_RADIUS_PX
+    if snap_drift <= allowed_radius:
+        stable_for = now - started_at
+        if stable_for >= SNAP_ARM_SECONDS:
+            active = True
+        return SnapUpdate(active, anchor, started_at)
+
+    return SnapUpdate(False, (float(cursor_x), float(cursor_y)), now)
 
 
 def update_spock_state(spock, *, raw_score, upright_now, now, sample_seconds,

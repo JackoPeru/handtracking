@@ -30,7 +30,12 @@ from handtracking_flow import (
 from handtracking_hud import draw_runtime_hud
 from handtracking_handlers import update_radial_state, update_two_hand_state
 from handtracking_mediapipe import MediaPipeWorker
-from handtracking_processing import update_ema_metrics, update_spock_state
+from handtracking_processing import (
+    update_ema_metrics,
+    update_precision_snap,
+    update_spock_state,
+    update_swipe_pose,
+)
 from handtracking_config import *
 from handtracking_gestures import (
     clamp,
@@ -50,7 +55,6 @@ from handtracking_gestures import (
     radial_direction,
     spock_all_fingers_up,
     spock_pose_score,
-    swipe_pose_metrics,
     two_hand_geometry,
     wrapped_angle_delta,
 )
@@ -601,27 +605,12 @@ def _run_impl(cleanup):
                     not radial.active and not scroll.active and
                     now >= gesture_input_block_until
                 )
-                if swipe_allowed:
-                    (swipe.debug_score, swipe.debug_gap,
-                     swipe.debug_extended) = swipe_pose_metrics(control_hand)
-                    swipe.pose_history.append(swipe.debug_score)
-                    best_scores = sorted(swipe.pose_history, reverse=True)[:SWIPE_POSE_KEEP_BEST]
-                    swipe.debug_stable = sum(best_scores) / max(len(best_scores), 1)
-                    if (swipe.debug_score >= SWIPE_POSE_SCORE_ON or
-                            swipe.debug_stable >= SWIPE_POSE_SCORE_ON):
-                        swipe.pose_last_seen = now
-                    elif (swipe.tracking and
-                          swipe.debug_score >= SWIPE_POSE_SCORE_HOLD):
-                        # Solo uno swipe gia' partito usa la soglia bassa per
-                        # tollerare motion blur senza armare falsamente il mouse.
-                        swipe.pose_last_seen = now
-                else:
-                    swipe.debug_score = 0.0
-                    swipe.debug_stable = 0.0
-                    swipe.debug_gap = 9.0
-                    swipe.debug_extended = 0
-                    swipe.pose_history.clear()
-                    swipe.pose_last_seen = None
+                update_swipe_pose(
+                    swipe,
+                    allowed=swipe_allowed,
+                    control_hand=control_hand,
+                    now=now,
+                )
 
                 # MediaPipe ri-ancora i punti rigidi del palmo; LK li porta al frame corrente.
                 # Puntatore pinch-only. La mano aperta non muove mai il cursore.
@@ -978,29 +967,17 @@ def _run_impl(cleanup):
             not radial.active and not swipe.tracking and
             now >= gesture_input_block_until
         )
-        if snap_allowed:
-            cursor_x, cursor_y = cursor.position()
-            if snap_anchor is None or snap_started_at is None:
-                snap_anchor = (float(cursor_x), float(cursor_y))
-                snap_started_at = now
-                precision_snap_active = False
-            else:
-                snap_drift = math.hypot(
-                    cursor_x - snap_anchor[0], cursor_y - snap_anchor[1]
-                )
-                allowed_radius = SNAP_HOLD_RADIUS_PX if precision_snap_active else SNAP_RADIUS_PX
-                if snap_drift <= allowed_radius:
-                    stable_for = now - snap_started_at
-                    if stable_for >= SNAP_ARM_SECONDS:
-                        precision_snap_active = True
-                else:
-                    snap_anchor = (float(cursor_x), float(cursor_y))
-                    snap_started_at = now
-                    precision_snap_active = False
-        else:
-            snap_anchor = None
-            snap_started_at = None
-            precision_snap_active = False
+        snap_update = update_precision_snap(
+            allowed=snap_allowed,
+            cursor_position=cursor.position() if snap_allowed else None,
+            now=now,
+            active=precision_snap_active,
+            anchor=snap_anchor,
+            started_at=snap_started_at,
+        )
+        precision_snap_active = snap_update.active
+        snap_anchor = snap_update.anchor
+        snap_started_at = snap_update.started_at
 
         pinch_now = pointer.pinch_held
         gesture_mode = resolve_runtime_mode(
