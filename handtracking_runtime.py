@@ -649,6 +649,52 @@ def cursor_worker():
         time.sleep(1.0 / CURSOR_OUTPUT_HZ)
 
 
+class RuntimeCleanup:
+    """Own runtime resources so cleanup is guaranteed by the public wrapper."""
+
+    def __init__(self):
+        self.capture = None
+        self.mediapipe_worker = None
+        self.cursor_thread = None
+
+    def close(self):
+        global cursor_stop
+
+        try:
+            sync_cursor_target(False)
+        except Exception:
+            pass
+
+        worker = self.mediapipe_worker
+        if worker is not None:
+            try:
+                worker.stop()
+            except Exception:
+                pass
+            try:
+                worker.join(timeout=2.0)
+            except Exception:
+                pass
+
+        cursor_stop = True
+        if self.cursor_thread is not None:
+            try:
+                self.cursor_thread.join(timeout=0.25)
+            except Exception:
+                pass
+
+        if self.capture is not None:
+            try:
+                self.capture.release()
+            except Exception:
+                pass
+
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+
+
 def draw_hand(frame, hand, pinch_active=False, paused=False, scrolling=False, volume_control=False):
     h, w = frame.shape[:2]
     pts = [(int(p.x * w), int(p.y * h)) for p in hand]
@@ -917,13 +963,15 @@ SPOCK_CENTER_RATIO_MIN = 1.12
 SPOCK_CENTER_RATIO_GOOD = 1.85
 SPOCK_CENTER_RATIO_CLEAR = 1.34
 
-def run():
+def _run_impl(cleanup):
     global cursor_stop
     cursor_stop = False
     cap = cv2.VideoCapture(0, cv2.CAP_MSMF)
+    cleanup.capture = cap
     if not cap.isOpened():
         cap.release()
         cap = cv2.VideoCapture(0)
+        cleanup.capture = cap
     if not cap.isOpened():
         raise RuntimeError("Impossibile aprire la webcam")
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
@@ -955,9 +1003,11 @@ def run():
         options=options,
         image_builder=build_mediapipe_image,
     )
+    cleanup.mediapipe_worker = mp_worker
     mp_worker.start()
     sync_cursor_target(False)
     cursor_thread = threading.Thread(target=cursor_worker, daemon=True)
+    cleanup.cursor_thread = cursor_thread
     cursor_thread.start()
 
     flow_prev_gray = None
@@ -1088,8 +1138,12 @@ def run():
         # resize/cvtColor allocano array nuovi a ogni frame: il worker puo'
         # mantenere questi riferimenti senza costose copie aggiuntive.
         mp_worker.submit(detect_frame, gray, ts, now)
-        packet = mp_worker.snapshot()
-        mp_stats = mp_worker.stats()
+        mp_state = mp_worker.snapshot_state()
+        packet = mp_state["latest"]
+        mp_stats = mp_state
+        if not mp_state["alive"]:
+            detail = mp_state["last_error"] or "unknown worker failure"
+            raise RuntimeError(f"MediaPipe worker stopped: {detail}")
         mp_input_seq = mp_stats["input_seq"]
         mp_overwrites = mp_stats["overwrites"]
         mp_error_count = mp_stats["error_count"]
@@ -2513,7 +2567,7 @@ def run():
 
         mp_elapsed = now - mp_fps_window_start
         if mp_elapsed >= 0.5:
-            completed_seq = mp_worker.stats()["seq"]
+            completed_seq = mp_worker.snapshot_state()["seq"]
             actual_mp_fps = (completed_seq - mp_fps_last_seq) / mp_elapsed
             mp_fps_last_seq = completed_seq
             mp_fps_window_start = now
@@ -2622,13 +2676,15 @@ def run():
         if cv2.waitKey(1) & 0xFF == 27:
             break
 
-    sync_cursor_target(False)
-    mp_worker.stop()
-    mp_worker.join(timeout=2.0)
-    cursor_stop = True
-    cursor_thread.join(timeout=0.25)
-    cap.release()
-    cv2.destroyAllWindows()
+    return None
+
+
+def run():
+    cleanup = RuntimeCleanup()
+    try:
+        return _run_impl(cleanup)
+    finally:
+        cleanup.close()
 
 
 if __name__ == "__main__":

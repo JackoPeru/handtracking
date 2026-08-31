@@ -36,6 +36,31 @@ class FakeFactory:
 
 
 class MediaPipeWorkerTests(unittest.TestCase):
+    def test_snapshot_state_returns_result_and_stats_from_one_locked_snapshot(self):
+        from handtracking_mediapipe import MediaPipeWorker
+
+        worker = MediaPipeWorker(
+            factory=FakeFactory(FakeLandmarker()),
+            options=object(),
+            image_builder=lambda frame: frame,
+        )
+        enqueued_at = time.perf_counter()
+        worker.start()
+        worker.submit("frame", "gray", 1, enqueued_at)
+        deadline = time.time() + 1.0
+        while worker.stats()["seq"] == 0 and time.time() < deadline:
+            time.sleep(0.01)
+
+        state = worker.snapshot_state()
+        worker.stop()
+        worker.join(timeout=1.0)
+
+        self.assertEqual(state["seq"], 1)
+        self.assertIsNotNone(state["latest"])
+        self.assertEqual(state["latest"][0], state["seq"])
+        self.assertAlmostEqual(state["last_result_input_at"], enqueued_at, places=5)
+        self.assertIn("alive", state)
+
     def test_worker_owns_landmarker_until_inference_finishes(self):
         from handtracking_mediapipe import MediaPipeWorker
 

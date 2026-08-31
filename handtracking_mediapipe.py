@@ -49,6 +49,21 @@ class MediaPipeWorker(threading.Thread):
                 "last_result_input_at": self._last_result_input_at,
             }
 
+    def snapshot_state(self):
+        """Return result and worker metadata from the same locked snapshot."""
+        with self._lock:
+            return {
+                "latest": self._latest,
+                "seq": self._seq,
+                "input_seq": self._input_seq,
+                "overwrites": self._overwrites,
+                "error_count": self._error_count,
+                "last_error": self._last_error,
+                "last_success_at": self._last_success_at,
+                "last_result_input_at": self._last_result_input_at,
+                "alive": self.is_alive(),
+            }
+
     @property
     def error_count(self):
         return self.stats()["error_count"]
