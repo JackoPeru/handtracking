@@ -88,7 +88,7 @@ class SourceContractTests(unittest.TestCase):
         )
         for symbol in dead_state:
             with self.subTest(symbol=symbol):
-                self.assertNotRegex(SOURCE, rf"\b{re.escape(symbol)}\b")
+                self.assertNotRegex(SOURCE, rf"(?<!\.)\b{re.escape(symbol)}\b")
 
     def test_dead_gesture_statuses_are_removed(self):
         self.assertNotIn('gesture_mode == "DRAG"', SOURCE)

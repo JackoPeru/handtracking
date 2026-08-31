@@ -48,6 +48,16 @@ from handtracking_gestures import (
     wrapped_angle_delta,
 )
 from handtracking_render import draw_hand, draw_radial_menu, draw_two_hand_transform
+from handtracking_state import (
+    FlowState,
+    PointerState,
+    RadialState,
+    ScrollState,
+    SpockState,
+    SwipeState,
+    TwoHandState,
+    VolumeState,
+)
 from handtracking_windows import (
     CursorController,
     ctrl_wheel,
@@ -211,6 +221,15 @@ def _run_impl(cleanup):
     cursor.sync(False)
     cursor.start()
 
+    flow = FlowState()
+    pointer = PointerState()
+    scroll = ScrollState()
+    volume = VolumeState(level=get_system_volume())
+    swipe = SwipeState()
+    radial = RadialState()
+    two_hand = TwoHandState()
+    spock = SpockState()
+
     flow_prev_gray = None
     flow_points = None
     flow_virtual = np.zeros(2, dtype=np.float64)
@@ -229,10 +248,10 @@ def _run_impl(cleanup):
     fist_states = []
     scroll_states = []
     paused_by_fist = False
-    scroll_active = False
-    scroll_candidate_at = None
-    scroll_release_at = None
-    scroll_residual = 0.0
+    scroll.active = False
+    scroll.candidate_at = None
+    scroll.release_at = None
+    scroll.residual = 0.0
     volume_active = False
     volume_candidate_at = None
     volume_candidate_last_seen = None
@@ -299,18 +318,18 @@ def _run_impl(cleanup):
     spock_score_history = deque(maxlen=SPOCK_SCORE_WINDOW)
     spock_upright_invalid_frames = 0
 
-    last_click_at = None
+    pointer.last_click_at = None
 
     # Puntatore pinch-only.
-    pointer_pinch_held = False
-    pointer_move_active = False
-    pointer_pinch_started_at = None
-    pointer_release_at = None
-    pointer_release_braking = False
+    pointer.pinch_held = False
+    pointer.move_active = False
+    pointer.pinch_started_at = None
+    pointer.release_at = None
+    pointer.release_braking = False
     # Spostamento netto del palmo dall'inizio del pinch. Non somma il jitter.
-    pointer_motion_accum = np.zeros(2, dtype=np.float64)
-    pointer_flow_travel = 0.0
-    pointer_cursor_origin = None
+    pointer.motion_accum = np.zeros(2, dtype=np.float64)
+    pointer.flow_travel = 0.0
+    pointer.cursor_origin = None
 
     # Precision snap: stabilizza il cursore quando la mano rallenta.
     snap_anchor = None
@@ -375,10 +394,10 @@ def _run_impl(cleanup):
             volume_last_angle = None
             volume_delta_history.clear()
             volume_vote_history.clear()
-            scroll_active = False
-            scroll_candidate_at = None
-            scroll_release_at = None
-            scroll_residual = 0.0
+            scroll.active = False
+            scroll.candidate_at = None
+            scroll.release_at = None
+            scroll.residual = 0.0
             two_hand_active = False
             two_hand_candidate_at = None
             two_hand_release_at = None
@@ -401,14 +420,14 @@ def _run_impl(cleanup):
             swipe_flow_accum_x = 0.0
             swipe_flow_accum_y = 0.0
             swipe_pose_last_seen = None
-            pointer_pinch_held = False
-            pointer_move_active = False
-            pointer_pinch_started_at = None
-            pointer_release_at = None
-            pointer_release_braking = False
-            pointer_motion_accum[:] = 0.0
-            pointer_flow_travel = 0.0
-            pointer_cursor_origin = None
+            pointer.pinch_held = False
+            pointer.move_active = False
+            pointer.pinch_started_at = None
+            pointer.release_at = None
+            pointer.release_braking = False
+            pointer.motion_accum[:] = 0.0
+            pointer.flow_travel = 0.0
+            pointer.cursor_origin = None
             mp_control_ref = None
             control_handedness = None
             flow_points = None
@@ -483,10 +502,10 @@ def _run_impl(cleanup):
                             # optical flow usato dal mouse, quindi non c'e' piu' competizione.
                             swipe_motion_consumed = False
                             swipe_base_gate = (
-                                not pointer_pinch_held and
+                                not pointer.pinch_held and
                                 not volume_active and volume_candidate_at is None and
                                 not two_hand_active and not radial_active and
-                                not scroll_active and two_hand_candidate_at is None and
+                                not scroll.active and two_hand_candidate_at is None and
                                 now >= swipe_cooldown_until
                             )
                             swipe_pose_recent = (
@@ -571,30 +590,30 @@ def _run_impl(cleanup):
                             elif (volume_active or two_hand_active or radial_active or
                                     two_hand_candidate_at is not None):
                                 pass
-                            elif scroll_active:
+                            elif scroll.active:
                                 if abs(motion_dy) >= SCROLL_DEADZONE_PX:
-                                    scroll_residual += motion_dy * SCROLL_GAIN
-                                    if abs(scroll_residual) >= SCROLL_EVENT_STEP:
-                                        steps = int(scroll_residual / SCROLL_EVENT_STEP)
+                                    scroll.residual += motion_dy * SCROLL_GAIN
+                                    if abs(scroll.residual) >= SCROLL_EVENT_STEP:
+                                        steps = int(scroll.residual / SCROLL_EVENT_STEP)
                                         wheel_delta = int(clamp(
                                             steps * SCROLL_EVENT_STEP,
                                             -SCROLL_MAX_EVENT, SCROLL_MAX_EVENT,
                                         ))
                                         mouse_wheel(wheel_delta)
-                                        scroll_residual -= wheel_delta
-                            elif pointer_pinch_held and not pointer_release_braking:
+                                        scroll.residual -= wheel_delta
+                            elif pointer.pinch_held and not pointer.release_braking:
                                 # Il click non deve trasformarsi in movimento per jitter:
                                 # misura lo spostamento NETTO del palmo dall'inizio del pinch.
-                                pointer_motion_accum += np.array(
+                                pointer.motion_accum += np.array(
                                     [motion_dx, motion_dy], dtype=np.float64,
                                 )
-                                pointer_flow_travel = max(
-                                    pointer_flow_travel,
-                                    float(np.linalg.norm(pointer_motion_accum)),
+                                pointer.flow_travel = max(
+                                    pointer.flow_travel,
+                                    float(np.linalg.norm(pointer.motion_accum)),
                                 )
-                                if (not pointer_move_active and
-                                        pointer_flow_travel >= POINTER_MOVE_TRIGGER_PX):
-                                    pointer_move_active = True
+                                if (not pointer.move_active and
+                                        pointer.flow_travel >= POINTER_MOVE_TRIGGER_PX):
+                                    pointer.move_active = True
                                     cursor.sync(True)
                                     # Il movimento che ha superato la soglia serve solo a
                                     # distinguere move da click: riancora qui per evitare salti.
@@ -603,7 +622,7 @@ def _run_impl(cleanup):
                                     flow_prev_filtered[:] = 0.0
                                     flow_time = None
 
-                                if pointer_move_active:
+                                if pointer.move_active:
                                     flow_virtual += np.array(
                                         [motion_dx, motion_dy], dtype=np.float64,
                                     )
@@ -833,10 +852,10 @@ def _run_impl(cleanup):
                     volume_last_angle = None
                     volume_delta_history.clear()
                     volume_vote_history.clear()
-                    scroll_active = False
-                    scroll_candidate_at = None
-                    scroll_release_at = None
-                    scroll_residual = 0.0
+                    scroll.active = False
+                    scroll.candidate_at = None
+                    scroll.release_at = None
+                    scroll.residual = 0.0
                     two_hand_active = False
                     two_hand_candidate_at = None
                     two_hand_release_at = None
@@ -1036,10 +1055,10 @@ def _run_impl(cleanup):
                             radial_release_at = None
                             radial_pinch_latched = False
                             swipe_tracking = False
-                            scroll_active = False
-                            scroll_candidate_at = None
-                            scroll_release_at = None
-                            scroll_residual = 0.0
+                            scroll.active = False
+                            scroll.candidate_at = None
+                            scroll.release_at = None
+                            scroll.residual = 0.0
                             volume_candidate_at = None
                             volume_candidate_last_seen = None
                             volume_vote_history.clear()
@@ -1175,7 +1194,7 @@ def _run_impl(cleanup):
                 else:
                     open_now = is_radial_open_pose(control_class_hand)
                     radial_can_arm = (
-                        open_now and not scroll_active and not swipe_tracking and
+                        open_now and not scroll.active and not swipe_tracking and
                         not volume_candidate_now and volume_candidate_at is None and
                         now >= gesture_input_block_until
                     )
@@ -1202,10 +1221,10 @@ def _run_impl(cleanup):
                                 radial_pinch_latched = False
                                 radial_pinch_candidate_at = None
                                 swipe_tracking = False
-                                scroll_active = False
-                                scroll_candidate_at = None
-                                scroll_release_at = None
-                                scroll_residual = 0.0
+                                scroll.active = False
+                                scroll.candidate_at = None
+                                scroll.release_at = None
+                                scroll.residual = 0.0
                                 cursor.sync(False)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
@@ -1222,7 +1241,7 @@ def _run_impl(cleanup):
                     not paused_by_fist and not volume_active and
                     not volume_candidate_now and volume_candidate_at is None and
                     not two_hand_active and two_hand_candidate_at is None and
-                    not radial_active and not scroll_active and
+                    not radial_active and not scroll.active and
                     now >= gesture_input_block_until
                 )
                 if swipe_allowed:
@@ -1258,7 +1277,7 @@ def _run_impl(cleanup):
                     two_hand_active=two_hand_active,
                     two_hand_candidate=two_hand_candidate_at is not None,
                     radial_active=radial_active,
-                    scroll_active=scroll_active,
+                    scroll_active=scroll.active,
                     swipe_tracking=swipe_tracking,
                     input_blocked=now < gesture_input_block_until,
                     volume_candidate=(
@@ -1269,65 +1288,65 @@ def _run_impl(cleanup):
                 pointer_fingers_valid = pointer_other_fingers_valid(control_hand)
                 pointer_pose_on = is_pointer_pinch_pose(control_hand, POINTER_PINCH_ON)
 
-                if pointer_pinch_held:
+                if pointer.pinch_held:
                     # Se medio/anulare/mignolo si chiudono a pugno, annulla il
                     # puntatore: non deve diventare ne' movimento ne' click.
                     if not pointer_allowed or not pointer_fingers_valid:
-                        pointer_pinch_held = False
-                        pointer_move_active = False
-                        pointer_pinch_started_at = None
-                        pointer_release_at = None
-                        pointer_release_braking = False
-                        pointer_motion_accum[:] = 0.0
-                        pointer_flow_travel = 0.0
-                        pointer_cursor_origin = None
+                        pointer.pinch_held = False
+                        pointer.move_active = False
+                        pointer.pinch_started_at = None
+                        pointer.release_at = None
+                        pointer.release_braking = False
+                        pointer.motion_accum[:] = 0.0
+                        pointer.flow_travel = 0.0
+                        pointer.cursor_origin = None
                         cursor.sync(False)
                     elif pointer_ratio > POINTER_PINCH_OFF:
                         # Congela immediatamente il cursore appena il pinch e' chiaramente
                         # aperto. La grace sotto serve solo a confermare il rilascio.
-                        pointer_release_braking = True
-                        pointer_move_active = False
+                        pointer.release_braking = True
+                        pointer.move_active = False
                         cursor.sync(False)
                         flow_virtual[:] = 0.0
                         flow_filtered[:] = 0.0
                         flow_prev_filtered[:] = 0.0
                         flow_time = None
-                        if pointer_release_at is None:
-                            pointer_release_at = now
-                        elif now - pointer_release_at >= POINTER_RELEASE_GRACE:
-                            pinch_duration = now - (pointer_pinch_started_at or now)
+                        if pointer.release_at is None:
+                            pointer.release_at = now
+                        elif now - pointer.release_at >= POINTER_RELEASE_GRACE:
+                            pinch_duration = now - (pointer.pinch_started_at or now)
                             quick_click = (
                                 pinch_duration <= POINTER_CLICK_MAX_SECONDS and
-                                pointer_flow_travel <= POINTER_CLICK_MAX_TRAVEL_PX
+                                pointer.flow_travel <= POINTER_CLICK_MAX_TRAVEL_PX
                             )
                             if quick_click:
                                 # Un click rapido non deve spostare il cursore nemmeno
                                 # se i primi frame del pinch hanno prodotto un po' di jitter.
-                                if pointer_cursor_origin is not None:
+                                if pointer.cursor_origin is not None:
                                     cursor.set_position(
-                                        pointer_cursor_origin[0], pointer_cursor_origin[1]
+                                        pointer.cursor_origin[0], pointer.cursor_origin[1]
                                     )
                                     cursor.sync(False)
                                 is_double_pinch = (
-                                    last_click_at is not None and
-                                    now - last_click_at <= DOUBLE_PINCH_WINDOW
+                                    pointer.last_click_at is not None and
+                                    now - pointer.last_click_at <= DOUBLE_PINCH_WINDOW
                                 )
                                 left_click()
                                 if is_double_pinch:
                                     gesture_event = "DOPPIO PINCH: DOPPIO CLICK"
-                                    last_click_at = None
+                                    pointer.last_click_at = None
                                 else:
                                     gesture_event = "PINCH RAPIDO: CLICK"
-                                    last_click_at = now
+                                    pointer.last_click_at = now
                                 gesture_event_until = now + GESTURE_EVENT_SHOW_SECONDS
-                            pointer_pinch_held = False
-                            pointer_move_active = False
-                            pointer_pinch_started_at = None
-                            pointer_release_at = None
-                            pointer_release_braking = False
-                            pointer_motion_accum[:] = 0.0
-                            pointer_flow_travel = 0.0
-                            pointer_cursor_origin = None
+                            pointer.pinch_held = False
+                            pointer.move_active = False
+                            pointer.pinch_started_at = None
+                            pointer.release_at = None
+                            pointer.release_braking = False
+                            pointer.motion_accum[:] = 0.0
+                            pointer.flow_travel = 0.0
+                            pointer.cursor_origin = None
                             precision_snap_active = False
                             snap_anchor = None
                             snap_started_at = None
@@ -1339,26 +1358,26 @@ def _run_impl(cleanup):
                     elif pointer_ratio > POINTER_RELEASE_BRAKE_RATIO:
                         # Pre-rilascio: blocca il cursore prima ancora di raggiungere
                         # la soglia OFF, cosi' l'apertura delle dita non trascina il mouse.
-                        pointer_release_braking = True
-                        pointer_move_active = False
-                        pointer_release_at = None
+                        pointer.release_braking = True
+                        pointer.move_active = False
+                        pointer.release_at = None
                         cursor.sync(False)
                         flow_virtual[:] = 0.0
                         flow_filtered[:] = 0.0
                         flow_prev_filtered[:] = 0.0
                         flow_time = None
                     else:
-                        pointer_release_braking = False
-                        pointer_release_at = None
+                        pointer.release_braking = False
+                        pointer.release_at = None
                 elif pointer_allowed and pointer_pose_on:
-                    pointer_pinch_held = True
-                    pointer_move_active = False
-                    pointer_pinch_started_at = now
-                    pointer_release_at = None
-                    pointer_release_braking = False
-                    pointer_motion_accum[:] = 0.0
-                    pointer_flow_travel = 0.0
-                    pointer_cursor_origin = cursor.position()
+                    pointer.pinch_held = True
+                    pointer.move_active = False
+                    pointer.pinch_started_at = now
+                    pointer.release_at = None
+                    pointer.release_braking = False
+                    pointer.motion_accum[:] = 0.0
+                    pointer.flow_travel = 0.0
+                    pointer.cursor_origin = cursor.position()
                     swipe_tracking = False
                     swipe_flow_started_at = None
                     swipe_flow_accum_x = 0.0
@@ -1389,10 +1408,10 @@ def _run_impl(cleanup):
                     volume_last_angle = None
                     volume_delta_history.clear()
                     volume_vote_history.clear()
-                    scroll_active = False
-                    scroll_candidate_at = None
-                    scroll_release_at = None
-                    scroll_residual = 0.0
+                    scroll.active = False
+                    scroll.candidate_at = None
+                    scroll.release_at = None
+                    scroll.residual = 0.0
                     two_hand_active = False
                     two_hand_candidate_at = None
                     two_hand_release_at = None
@@ -1414,7 +1433,7 @@ def _run_impl(cleanup):
                 else:
                     if not volume_active:
                         dedicated_mode_block = (
-                            pointer_pinch_held or
+                            pointer.pinch_held or
                             two_hand_active or two_hand_candidate_at is not None or
                             radial_active or swipe_tracking
                         )
@@ -1435,10 +1454,10 @@ def _run_impl(cleanup):
                                 volume_last_angle = palm_roll_angle(control_hand)
                                 volume_delta_history.clear()
                                 volume_level = get_system_volume()
-                                scroll_active = False
-                                scroll_candidate_at = None
-                                scroll_release_at = None
-                                scroll_residual = 0.0
+                                scroll.active = False
+                                scroll.candidate_at = None
+                                scroll.release_at = None
+                                scroll.residual = 0.0
                                 cursor.sync(False)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
@@ -1527,38 +1546,38 @@ def _run_impl(cleanup):
                                     )
                                     set_system_volume(volume_level)
 
-                    if (pointer_pinch_held or volume_active or two_hand_active or radial_active or
+                    if (pointer.pinch_held or volume_active or two_hand_active or radial_active or
                             swipe_tracking or two_hand_candidate_at is not None):
-                        scroll_active = False
-                        scroll_candidate_at = None
-                        scroll_release_at = None
-                        scroll_residual = 0.0
-                    elif not scroll_active:
+                        scroll.active = False
+                        scroll.candidate_at = None
+                        scroll.release_at = None
+                        scroll.residual = 0.0
+                    elif not scroll.active:
                         if scroll_gesture_now:
-                            if scroll_candidate_at is None:
-                                scroll_candidate_at = now
-                            elif now - scroll_candidate_at >= SCROLL_CONFIRM_SECONDS:
-                                scroll_active = True
-                                scroll_release_at = None
-                                scroll_residual = 0.0
+                            if scroll.candidate_at is None:
+                                scroll.candidate_at = now
+                            elif now - scroll.candidate_at >= SCROLL_CONFIRM_SECONDS:
+                                scroll.active = True
+                                scroll.release_at = None
+                                scroll.residual = 0.0
                                 cursor.sync(False)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
                                 flow_prev_filtered[:] = 0.0
                                 flow_time = None
                         else:
-                            scroll_candidate_at = None
+                            scroll.candidate_at = None
                     else:
                         if scroll_gesture_now:
-                            scroll_release_at = None
+                            scroll.release_at = None
                         else:
-                            if scroll_release_at is None:
-                                scroll_release_at = now
-                            elif now - scroll_release_at >= SCROLL_RELEASE_GRACE:
-                                scroll_active = False
-                                scroll_candidate_at = None
-                                scroll_release_at = None
-                                scroll_residual = 0.0
+                            if scroll.release_at is None:
+                                scroll.release_at = now
+                            elif now - scroll.release_at >= SCROLL_RELEASE_GRACE:
+                                scroll.active = False
+                                scroll.candidate_at = None
+                                scroll.release_at = None
+                                scroll.residual = 0.0
                                 cursor.sync(True)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
@@ -1573,10 +1592,10 @@ def _run_impl(cleanup):
                     flow_time = None
                 else:
                     exclusive_cursor_block = (
-                        scroll_active or volume_active or two_hand_active or radial_active or
+                        scroll.active or volume_active or two_hand_active or radial_active or
                         swipe_tracking or two_hand_candidate_at is not None
                     )
-                    if (pointer_move_active and not exclusive_cursor_block and
+                    if (pointer.move_active and not exclusive_cursor_block and
                             now >= gesture_input_block_until and
                             (old_pause or not cursor.active)):
                         cursor.sync(True)
@@ -1584,10 +1603,10 @@ def _run_impl(cleanup):
                         flow_filtered[:] = 0.0
                         flow_prev_filtered[:] = 0.0
                         flow_time = None
-                    elif not pointer_move_active and cursor.active:
+                    elif not pointer.move_active and cursor.active:
                         cursor.sync(False)
 
-                    if (pointer_pinch_held and pointer_move_active and
+                    if (pointer.pinch_held and pointer.move_active and
                             not exclusive_cursor_block and corrected is None and
                             old_mp_ref is not None and mp_control_ref is not None and
                             not old_pause and now >= gesture_input_block_until):
@@ -1597,7 +1616,7 @@ def _run_impl(cleanup):
                         fdy = mp_control_ref[1] - old_mp_ref[1]
                         fdx, fdy = normalize_flow_delta(fdx, fdy, flow_motion_scale)
                         fmag = math.hypot(fdx, fdy)
-                        pointer_flow_travel += fmag * max(DETECTION_W, DETECTION_H)
+                        pointer.flow_travel += fmag * max(DETECTION_W, DETECTION_H)
                         if 0.0005 < fmag < 0.055:
                             fallback_dt = (
                                 max(mp_cycle_ms_ema / 1000.0, 1.0 / 60.0)
@@ -1661,7 +1680,7 @@ def _run_impl(cleanup):
                 # gesture, ma e' troppo lungo per un cursore: se la mano sparisce,
                 # LK puo' iniziare a seguire lo sfondo. Congela quindi il puntatore
                 # dopo circa due frame e lo riancora quando MediaPipe rivede la mano.
-                if (pointer_move_active and
+                if (pointer.move_active and
                         now - last_hand_seen > POINTER_TRACKING_LOSS_GRACE):
                     cursor.sync(False)
                     flow_points = None
@@ -1683,10 +1702,10 @@ def _run_impl(cleanup):
                     volume_delta_history.clear()
                     volume_vote_history.clear()
                     fist_vote_history.clear()
-                    scroll_active = False
-                    scroll_candidate_at = None
-                    scroll_release_at = None
-                    scroll_residual = 0.0
+                    scroll.active = False
+                    scroll.candidate_at = None
+                    scroll.release_at = None
+                    scroll.residual = 0.0
                     two_hand_active = False
                     two_hand_candidate_at = None
                     two_hand_release_at = None
@@ -1705,13 +1724,13 @@ def _run_impl(cleanup):
                     radial_pinch_latched = False
                     radial_pinch_candidate_at = None
                     swipe_tracking = False
-                    pointer_pinch_held = False
-                    pointer_move_active = False
-                    pointer_pinch_started_at = None
-                    pointer_release_at = None
-                    pointer_motion_accum[:] = 0.0
-                    pointer_flow_travel = 0.0
-                    pointer_cursor_origin = None
+                    pointer.pinch_held = False
+                    pointer.move_active = False
+                    pointer.pinch_started_at = None
+                    pointer.release_at = None
+                    pointer.motion_accum[:] = 0.0
+                    pointer.flow_travel = 0.0
+                    pointer.cursor_origin = None
                     gesture_input_block_until = 0.0
                     mp_control_ref = None
                     control_handedness = None
@@ -1724,10 +1743,10 @@ def _run_impl(cleanup):
 
         # Precision snap: quando il cursore resta stabile lo trattiene leggermente.
         snap_allowed = (
-            pointer_pinch_held and pointer_move_active and
+            pointer.pinch_held and pointer.move_active and
             commands_enabled and not spock_blocking and not paused_by_fist and
             latest_result is not None and bool(latest_result.hand_landmarks) and
-            not volume_active and volume_candidate_at is None and not scroll_active and
+            not volume_active and volume_candidate_at is None and not scroll.active and
             not two_hand_active and two_hand_candidate_at is None and
             not radial_active and not swipe_tracking and
             now >= gesture_input_block_until
@@ -1756,21 +1775,21 @@ def _run_impl(cleanup):
             snap_started_at = None
             precision_snap_active = False
 
-        pinch_now = pointer_pinch_held
+        pinch_now = pointer.pinch_held
         if spock_blocking:
             gesture_mode = "SPOCK"
         elif not commands_enabled:
             gesture_mode = "LOCKED"
         elif paused_by_fist:
             gesture_mode = "FIST"
-        elif pointer_move_active:
+        elif pointer.move_active:
             gesture_mode = "POINTER"
-        elif pointer_pinch_held:
+        elif pointer.pinch_held:
             gesture_mode = "PINCH"
         else:
             gesture_mode = resolve_gesture_mode(
                 paused_by_fist, volume_active, two_hand_active, radial_active,
-                scroll_active, swipe_tracking,
+                scroll.active, swipe_tracking,
             )
         if latest_result is not None and latest_result.hand_landmarks:
             for i, hand in enumerate(latest_result.hand_landmarks):
@@ -1778,7 +1797,7 @@ def _run_impl(cleanup):
                 draw_hand(frame, hand,
                           pinch_active=(i == control_index and pinch_now),
                           paused=paused,
-                          scrolling=(i == control_index and scroll_active),
+                          scrolling=(i == control_index and scroll.active),
                           volume_control=(i == control_index and volume_active))
 
         if radial_active and radial_center is not None:
