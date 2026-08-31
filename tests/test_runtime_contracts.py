@@ -31,6 +31,21 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("-m venv", launcher)
         self.assertIn("import cv2, mediapipe, numpy, pycaw, comtypes", launcher)
 
+    def test_launcher_requires_python_312_for_new_environment(self):
+        launcher = (ROOT / "Avvia Hand Tracking.bat").read_text(encoding="utf-8")
+        self.assertIn("py -3.12", launcher)
+        self.assertIn("sys.version_info >= (3, 12)", launcher)
+
+    def test_github_actions_runs_windows_python_312_checks(self):
+        workflow = ROOT / ".github" / "workflows" / "tests.yml"
+        self.assertTrue(workflow.exists())
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("windows-latest", text)
+        self.assertIn("python-version: '3.12'", text)
+        self.assertIn("unittest discover -s tests", text)
+        self.assertIn("py_compile", text)
+        self.assertIn("pip check", text)
+
 
 if __name__ == "__main__":
     unittest.main()
