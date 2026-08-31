@@ -8,8 +8,15 @@ Al primo avvio il launcher crea automaticamente `.venv`, aggiorna `pip` e instal
 
 Struttura principale:
 
-- `test.py`: entry-point protetto da `__main__`.
-- `handtracking_runtime.py`: camera, MediaPipe, optical flow e gesture runtime.
+- `main.py`: entry-point principale protetto da `__main__`.
+- `test.py`: shim di compatibilita' che delega a `main.py`.
+- `handtracking_runtime.py`: orchestrazione camera, MediaPipe, optical flow e stato runtime.
+- `handtracking_config.py`: costanti e soglie senza side effect.
+- `handtracking_gestures.py`: geometria e classificatori gesture puri.
+- `handtracking_engine.py`: priorita' e risoluzione della modalita' gesture.
+- `handtracking_state.py`: state object e reset centralizzati.
+- `handtracking_windows.py`: input Windows, volume e cursore asincrono.
+- `handtracking_render.py`: rendering OpenCV e overlay.
 - `handtracking_core.py`: logica pura e testabile di priorita', timing e tracking della mano.
 - `handtracking_mediapipe.py`: worker di inferenza che possiede il ciclo di vita del `HandLandmarker`.
 - `tests/`: regressioni automatiche che non richiedono la webcam.

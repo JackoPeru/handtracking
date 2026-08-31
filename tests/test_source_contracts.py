@@ -17,10 +17,15 @@ class SourceContractTests(unittest.TestCase):
             "dist", "dist3", "joint_angle3", "control_point",
             "normalized_pinch_ratio", "is_fist", "is_strong_fist",
             "is_scroll_gesture", "swipe_pose_metrics", "spock_pose_score",
-            "two_hand_geometry", "radial_direction", "resolve_gesture_mode",
+            "two_hand_geometry", "radial_direction",
         ):
             with self.subTest(function_name=function_name):
                 self.assertNotIn(f"def {function_name}(", SOURCE)
+
+    def test_runtime_uses_central_engine_for_mode_priority(self):
+        self.assertIn("from handtracking_engine import resolve_runtime_mode", SOURCE)
+        gestures_source = (ROOT / "handtracking_gestures.py").read_text(encoding="utf-8")
+        self.assertNotIn("def resolve_gesture_mode(", gestures_source)
 
     def test_runtime_uses_extracted_windows_and_render_modules(self):
         self.assertIn("from handtracking_windows import", SOURCE)

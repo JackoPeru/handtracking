@@ -351,19 +351,3 @@ def radial_direction(hand, center):
     if abs(dx) >= abs(dy):
         return "RIGHT" if dx > 0 else "LEFT"
     return "DOWN" if dy > 0 else "UP"
-
-
-def resolve_gesture_mode(paused, volume, two_hand, radial, scrolling, swipe_tracking):
-    if paused:
-        return "FIST"
-    if volume:
-        return "VOLUME"
-    if two_hand:
-        return "TWO_HAND"
-    if radial:
-        return "RADIAL"
-    if scrolling:
-        return "SCROLL"
-    if swipe_tracking:
-        return "SWIPE"
-    return "MOUSE"

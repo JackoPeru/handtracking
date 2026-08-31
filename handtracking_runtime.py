@@ -21,6 +21,7 @@ from handtracking_core import (
     spock_release_gate_active,
     tracking_result_is_stale,
 )
+from handtracking_engine import resolve_runtime_mode
 from handtracking_mediapipe import MediaPipeWorker
 from handtracking_config import *
 from handtracking_gestures import (
@@ -35,12 +36,10 @@ from handtracking_gestures import (
     is_scroll_gesture,
     is_strong_fist,
     is_volume_release_pose,
-    mouse_point,
     normalized_pinch_ratio,
     palm_roll_angle,
     pointer_other_fingers_valid,
     radial_direction,
-    resolve_gesture_mode,
     spock_all_fingers_up,
     spock_pose_score,
     swipe_pose_metrics,
@@ -1416,21 +1415,18 @@ def _run_impl(cleanup):
             precision_snap_active = False
 
         pinch_now = pointer.pinch_held
-        if spock.blocking:
-            gesture_mode = "SPOCK"
-        elif not commands_enabled:
-            gesture_mode = "LOCKED"
-        elif paused_by_fist:
-            gesture_mode = "FIST"
-        elif pointer.move_active:
-            gesture_mode = "POINTER"
-        elif pointer.pinch_held:
-            gesture_mode = "PINCH"
-        else:
-            gesture_mode = resolve_gesture_mode(
-                paused_by_fist, volume.active, two_hand.active, radial.active,
-                scroll.active, swipe.tracking,
-            )
+        gesture_mode = resolve_runtime_mode(
+            commands_enabled=commands_enabled,
+            spock_blocking=spock.blocking,
+            paused=paused_by_fist,
+            volume=volume.active,
+            two_hand=two_hand.active,
+            radial=radial.active,
+            scrolling=scroll.active,
+            swipe=swipe.tracking,
+            pointer_move=pointer.move_active,
+            pointer_pinch=pointer.pinch_held,
+        )
         if latest_result is not None and latest_result.hand_landmarks:
             for i, hand in enumerate(latest_result.hand_landmarks):
                 paused = fist_states[i] if i < len(fist_states) else False
