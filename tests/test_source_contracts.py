@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "handtracking_runtime.py").read_text(encoding="utf-8")
 WORKER_SOURCE = (ROOT / "handtracking_mediapipe.py").read_text(encoding="utf-8")
+CAMERA_SOURCE = (ROOT / "handtracking_camera.py").read_text(encoding="utf-8")
 HUD_SOURCE = (
     (ROOT / "handtracking_hud.py").read_text(encoding="utf-8")
     if (ROOT / "handtracking_hud.py").exists() else ""
@@ -74,12 +75,12 @@ class SourceContractTests(unittest.TestCase):
         )
 
     def test_camera_requests_mjpeg(self):
-        self.assertIn("CAP_PROP_FOURCC", SOURCE)
-        self.assertIn("MJPG", SOURCE)
-        self.assertNotIn("cap.set(cv2.CAP_PROP_FPS, FALLBACK_FPS)", SOURCE)
+        self.assertIn("CAP_PROP_FOURCC", CAMERA_SOURCE)
+        self.assertIn("MJPG", CAMERA_SOURCE)
+        self.assertNotIn("CAP_PROP_FPS, FALLBACK_FPS", CAMERA_SOURCE)
 
     def test_camera_failure_is_explicit(self):
-        self.assertIn('raise RuntimeError("Impossibile aprire la webcam")', SOURCE)
+        self.assertIn('raise RuntimeError("Impossibile aprire la webcam")', CAMERA_SOURCE)
 
     def test_camera_and_mediapipe_diagnostics_are_visible(self):
         self.assertIn("camera_codec", SOURCE)

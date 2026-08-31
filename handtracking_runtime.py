@@ -8,6 +8,7 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 
+from handtracking_camera import CameraRuntime
 from handtracking_core import (
     choose_camera_target_fps,
     normalize_flow_delta,
@@ -129,31 +130,13 @@ options = HandLandmarkerOptions(
 )
 
 def _run_impl(cleanup):
-    cap = cv2.VideoCapture(0, cv2.CAP_MSMF)
-    cleanup.capture = cap
-    if not cap.isOpened():
-        cap.release()
-        cap = cv2.VideoCapture(0)
-        cleanup.capture = cap
-    if not cap.isOpened():
-        raise RuntimeError("Impossibile aprire la webcam")
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_W)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_H)
-    cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    reported_fps = cap.get(cv2.CAP_PROP_FPS)
-    reported_w = int(round(cap.get(cv2.CAP_PROP_FRAME_WIDTH)))
-    reported_h = int(round(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-    reported_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-    camera_codec = "".join(
-        chr((reported_fourcc >> (8 * i)) & 0xFF) for i in range(4)
-    ).replace("\x00", "") or "?"
-    camera_target_fps = choose_camera_target_fps(
-        reported_fps, TARGET_FPS, FALLBACK_FPS,
-    )
-    cv2.namedWindow("Hands", cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty("Hands", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    camera = CameraRuntime.open()
+    cleanup.capture = camera.capture
+    reported_fps = camera.reported_fps
+    reported_w = camera.reported_w
+    reported_h = camera.reported_h
+    camera_codec = camera.codec
+    camera_target_fps = camera.target_fps
 
     start_time = time.perf_counter()
 
@@ -223,13 +206,13 @@ def _run_impl(cleanup):
     mp_cycle_ms_ema = 0.0
     mp_queue_ms_ema = 0.0
     while True:
-        ok, frame = cap.read()
-        if not ok:
+        prepared = camera.read_prepared()
+        if prepared is None:
             break
         now = time.perf_counter()
-        frame = cv2.flip(frame, 1)
-        detect_frame = cv2.resize(frame, (DETECTION_W, DETECTION_H), interpolation=cv2.INTER_AREA)
-        gray = cv2.cvtColor(detect_frame, cv2.COLOR_BGR2GRAY)
+        frame = prepared.frame
+        detect_frame = prepared.detect_frame
+        gray = prepared.gray
 
         ts = int((now - start_time) * 1000)
         # resize/cvtColor allocano array nuovi a ogni frame: il worker puo'
@@ -917,8 +900,7 @@ def _run_impl(cleanup):
             mp_error_count=mp_error_count,
             mp_last_error=mp_last_error,
         )
-        cv2.imshow("Hands", frame)
-        if cv2.waitKey(1) & 0xFF == 27:
+        if not camera.show(frame):
             break
 
     return None
