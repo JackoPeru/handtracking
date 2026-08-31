@@ -9,6 +9,19 @@ WORKER_SOURCE = (ROOT / "handtracking_mediapipe.py").read_text(encoding="utf-8")
 
 
 class SourceContractTests(unittest.TestCase):
+    def test_runtime_imports_extracted_config_and_gesture_classifiers(self):
+        self.assertIn("from handtracking_config import", SOURCE)
+        self.assertIn("from handtracking_gestures import", SOURCE)
+        self.assertNotIn("CAMERA_W, CAMERA_H =", SOURCE)
+        for function_name in (
+            "dist", "dist3", "joint_angle3", "control_point",
+            "normalized_pinch_ratio", "is_fist", "is_strong_fist",
+            "is_scroll_gesture", "swipe_pose_metrics", "spock_pose_score",
+            "two_hand_geometry", "radial_direction", "resolve_gesture_mode",
+        ):
+            with self.subTest(function_name=function_name):
+                self.assertNotIn(f"def {function_name}(", SOURCE)
+
     def test_media_pipe_queue_does_not_copy_fresh_frames(self):
         self.assertNotIn(
             "mp_pending = (detect_frame.copy(), gray.copy()",
