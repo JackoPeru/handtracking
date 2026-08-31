@@ -14,6 +14,7 @@ from handtracking_core import (
     choose_camera_target_fps,
     choose_control_index,
     fist_evidence_from_hands,
+    normalize_flow_delta,
     normalized_points_pixel_distance,
     palm_motion_scale,
     pointer_mode_allowed,
@@ -22,11 +23,13 @@ from handtracking_core import (
 )
 from handtracking_engine import resolve_runtime_mode
 from handtracking_flow import (
+    cursor_gain_for_speed,
     dispatch_flow_motion,
     flow_points_from_hand,
     measure_optical_flow,
     propagate_points,
 )
+from handtracking_hud import draw_runtime_hud
 from handtracking_mediapipe import MediaPipeWorker
 from handtracking_config import *
 from handtracking_gestures import (
@@ -1255,106 +1258,47 @@ def _run_impl(cleanup):
             mp_fps_last_seq = completed_seq
             mp_fps_window_start = now
 
-        if gesture_mode == "SPOCK":
-            status = f"SPOCK: {int(round(spock.progress * 100))}% | tieni 1 s per TOGGLE"
-        elif gesture_mode == "LOCKED":
-            status = "COMANDI BLOCCATI | fai SPOCK per 1 s"
-        elif gesture_mode == "FIST":
-            status = "PUGNO = PAUSA TRACKING"
-        elif gesture_mode == "VOLUME":
-            status = f"VOLUME: {int(round(volume.level * 100))}%"
-        elif gesture_mode == "TWO_HAND":
-            status = "2 MANI: ZOOM"
-        elif gesture_mode == "RADIAL":
-            choice = radial.selected if radial.selected is not None else "CENTRO"
-            status = f"MENU RADIALE: {choice} | PINCH = OK"
-        elif gesture_mode == "SCROLL":
-            status = "SCROLL: INDICE + MEDIO"
-        elif gesture_mode == "SWIPE":
-            status = "SWIPE: 4 DITA UNITE | SX=BACK DX=FORWARD"
-        elif gesture_mode == "POINTER":
-            status = "PUNTATORE: PINCH INDICE+POLLICE | MUOVI PER SPOSTARE"
-        elif gesture_mode == "PINCH":
-            status = "PINCH: RILASCIA RAPIDO = CLICK | MUOVI = PUNTATORE"
-        else:
-            status = "CURSORE FERMO | PINCH INDICE+POLLICE PER PUNTARE"
-        flow_label = "FLOW ON" if flow.active else "FLOW WAIT"
-        cv2.putText(frame, status, (30, 50), cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0, (0, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(
+        draw_runtime_hud(
             frame,
-            f"Camera {actual_fps:.1f} | MP {actual_mp_fps:.1f} FPS | call {mp_infer_ms_ema:.0f} ms | worker {mp_worker_ms_ema:.0f} ms | cycle {mp_cycle_ms_ema:.0f} ms | {flow_label}",
-            (30, 90), cv2.FONT_HERSHEY_SIMPLEX,
-            0.66, (255, 255, 255), 2, cv2.LINE_AA,
+            gesture_mode=gesture_mode,
+            gesture_event=gesture_event,
+            gesture_event_until=gesture_event_until,
+            now=now,
+            flow_active=flow.active,
+            commands_enabled=commands_enabled,
+            spock_blocking=spock.blocking,
+            spock_latched=spock.latched,
+            spock_progress=spock.progress,
+            volume_level=volume.level,
+            radial_selected=radial.selected,
+            actual_fps=actual_fps,
+            actual_mp_fps=actual_mp_fps,
+            mp_infer_ms=mp_infer_ms_ema,
+            mp_worker_ms=mp_worker_ms_ema,
+            mp_cycle_ms=mp_cycle_ms_ema,
+            mp_queue_ms=mp_queue_ms_ema,
+            mp_overwrites=mp_overwrites,
+            mp_input_seq=mp_input_seq,
+            camera_codec=camera_codec,
+            reported_w=reported_w,
+            reported_h=reported_h,
+            reported_fps=reported_fps,
+            camera_target_fps=camera_target_fps,
+            debug_fist_score=debug_fist_score,
+            debug_volume_score=debug_volume_score,
+            debug_grip_gap=debug_grip_gap,
+            debug_fist_folded=debug_fist_folded,
+            debug_fist_tightness=debug_fist_tightness,
+            debug_strong_fist=debug_strong_fist,
+            spock_debug_score=spock.debug_score,
+            spock_debug_stable=spock.debug_stable_score,
+            swipe_debug_score=swipe.debug_score,
+            swipe_debug_stable=swipe.debug_stable,
+            swipe_debug_gap=swipe.debug_gap,
+            swipe_debug_extended=swipe.debug_extended,
+            mp_error_count=mp_error_count,
+            mp_last_error=mp_last_error,
         )
-        drop_pct = 100.0 * mp_overwrites / max(mp_input_seq, 1)
-        cv2.putText(
-            frame,
-            f"MP queue {mp_queue_ms_ema:.1f} ms | drop {drop_pct:.0f}% | {camera_codec} {reported_w}x{reported_h}@{reported_fps:.0f} | target {camera_target_fps} | ESC",
-            (30, 125), cv2.FONT_HERSHEY_SIMPLEX,
-            0.58, (255, 255, 255), 2, cv2.LINE_AA,
-        )
-        cv2.putText(
-            frame,
-            f"FIST {debug_fist_score:.2f} | VOL {debug_volume_score:.2f} | GAP {debug_grip_gap:.2f}",
-            (30, 158), cv2.FONT_HERSHEY_SIMPLEX,
-            0.64, (255, 255, 255), 2, cv2.LINE_AA,
-        )
-        cv2.putText(
-            frame,
-            f"FOLD {debug_fist_folded}/4 | TIGHT {debug_fist_tightness:.2f} | STRONG {int(debug_strong_fist)}",
-            (30, 190), cv2.FONT_HERSHEY_SIMPLEX,
-            0.58, (255, 255, 255), 2, cv2.LINE_AA,
-        )
-        cv2.putText(
-            frame, f"ENGINE: {gesture_mode} | SPOCK raw {spock.debug_score:.2f} stable {spock.debug_stable_score:.2f}",
-            (30, 222), cv2.FONT_HERSHEY_SIMPLEX,
-            0.58, (200, 255, 200), 2, cv2.LINE_AA,
-        )
-        cv2.putText(
-            frame,
-            f"SWIPE raw {swipe.debug_score:.2f} stable {swipe.debug_stable:.2f} | JOIN {swipe.debug_gap:.2f} | EXT {swipe.debug_extended}/4",
-            (30, 254), cv2.FONT_HERSHEY_SIMPLEX,
-            0.56, (255, 255, 255), 2, cv2.LINE_AA,
-        )
-        if gesture_event and now < gesture_event_until:
-            cv2.putText(
-                frame, gesture_event,
-                (30, 286), cv2.FONT_HERSHEY_SIMPLEX,
-                0.72, (0, 255, 255), 2, cv2.LINE_AA,
-            )
-        if mp_error_count:
-            cv2.putText(
-                frame,
-                f"MP ERR {mp_error_count}: {mp_last_error}",
-                (30, 318), cv2.FONT_HERSHEY_SIMPLEX,
-                0.50, (0, 80, 255), 2, cv2.LINE_AA,
-            )
-
-        # Simula a schermo il LED che poi potra' stare sopra la TV.
-        frame_w = frame.shape[1]
-        if spock.blocking:
-            led_color = (0, 180, 255)      # ambra = Spock in lettura
-        elif commands_enabled:
-            led_color = (0, 255, 0)        # verde = comandi attivi
-        else:
-            led_color = (0, 0, 255)        # rosso = comandi bloccati
-        led_x, led_y = frame_w - 58, 45
-        cv2.circle(frame, (led_x, led_y), 17, led_color, -1, cv2.LINE_AA)
-        cv2.circle(frame, (led_x, led_y), 20, (255, 255, 255), 2, cv2.LINE_AA)
-        led_label = "CMD ON" if commands_enabled else "CMD OFF"
-        cv2.putText(frame, led_label, (frame_w - 155, 86),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, led_color, 2, cv2.LINE_AA)
-
-        if spock.blocking and not spock.latched:
-            bar_w, bar_h = 260, 16
-            bar_x, bar_y = frame_w - bar_w - 30, 108
-            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
-                          (255, 255, 255), 2)
-            fill_w = int(bar_w * clamp(spock.progress, 0.0, 1.0))
-            if fill_w > 0:
-                cv2.rectangle(frame, (bar_x, bar_y),
-                              (bar_x + fill_w, bar_y + bar_h), led_color, -1)
         cv2.imshow("Hands", frame)
         if cv2.waitKey(1) & 0xFF == 27:
             break

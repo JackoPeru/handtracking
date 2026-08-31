@@ -6,6 +6,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "handtracking_runtime.py").read_text(encoding="utf-8")
 WORKER_SOURCE = (ROOT / "handtracking_mediapipe.py").read_text(encoding="utf-8")
+HUD_SOURCE = (
+    (ROOT / "handtracking_hud.py").read_text(encoding="utf-8")
+    if (ROOT / "handtracking_hud.py").exists() else ""
+)
 
 
 class SourceContractTests(unittest.TestCase):
@@ -60,7 +64,7 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn("camera_codec", SOURCE)
         self.assertIn("mp_error_count", SOURCE)
         self.assertIn("mp_last_error", SOURCE)
-        self.assertIn("MP ERR", SOURCE)
+        self.assertIn("MP ERR", HUD_SOURCE)
 
     def test_mediapipe_errors_are_observable(self):
         self.assertRegex(WORKER_SOURCE, r"except Exception as \w+")
