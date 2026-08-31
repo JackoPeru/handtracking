@@ -8,5 +8,6 @@
 - Keep gesture mode priority in `handtracking_engine.py`; do not duplicate it in the runtime or classifiers.
 - Keep resettable gesture state in `handtracking_state.py`; prefer tested reset helpers over repeated assignment blocks.
 - Keep LK measurement/camera-rate motion dispatch in `handtracking_flow.py`, focused gesture transitions in `handtracking_handlers.py`, semi-pure MediaPipe processing in `handtracking_processing.py`, and diagnostics in `handtracking_hud.py`.
+- Keep webcam ownership/preprocessing in `handtracking_camera.py`, runtime resource ownership in `handtracking_session.py`, tracking-loss fail-safes in `handtracking_tracking.py`, MediaPipe packet orchestration in `handtracking_frame.py`, gesture-mode coordination in `handtracking_modes.py`, and volume/scroll/Spock state machines in their dedicated modules.
 - `handtracking_runtime.py` must remain an orchestrator; do not move extracted optical-flow, HUD, pointer, radial, two-hand, Spock or hand-analysis logic back into `_run_impl()`.
 - Verify with `python -m unittest discover -s tests -v` and compile every root Python module before merging.

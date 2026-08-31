@@ -143,3 +143,34 @@ def update_spock_state(spock, *, raw_score, upright_now, now, sample_seconds,
         event_until=event_until,
         input_block_until=input_block_until,
     )
+
+
+def update_spock_without_hands(spock, *, now, input_block_until):
+    """Advance Spock release/miss semantics when MediaPipe reports no hands."""
+    spock.debug_score = 0.0
+    spock.debug_stable_score = 0.0
+
+    if spock.latched:
+        if spock.release_at is None:
+            spock.release_at = now
+        elif now - spock.release_at >= SPOCK_RELEASE_SECONDS:
+            spock.latched = False
+            spock.blocking = False
+            spock.release_at = None
+            spock.progress = 0.0
+            spock.confirmed_seconds = 0.0
+            spock.score_history.clear()
+            input_block_until = max(
+                input_block_until,
+                now + SPOCK_POST_RELEASE_BLOCK,
+            )
+    elif (spock.candidate_at is not None and spock.last_seen is not None and
+          now - spock.last_seen > SPOCK_MISS_GRACE):
+        spock.candidate_at = None
+        spock.last_seen = None
+        spock.blocking = False
+        spock.progress = 0.0
+        spock.confirmed_seconds = 0.0
+        spock.score_history.clear()
+
+    return input_block_until

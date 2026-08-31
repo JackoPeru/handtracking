@@ -104,6 +104,22 @@
 
 ### Task 6: Final orchestrator and contracts
 
+Prima del final audit, estrarre il ramo `new_mp` in `handtracking_frame.py` per raggiungere il budget runtime approvato.
+
+**Files aggiuntivi:**
+- Create: `handtracking_frame.py`
+- Create: `handtracking_modes.py`
+- Create: `tests/test_frame.py`
+
+**Interface:**
+- Produces: `process_mediapipe_packet(session, packet, *, gray, now, camera_target_fps, callbacks...) -> FrameProcessResult`.
+
+- [ ] Scrivere RED test per packet duplicato, packet nuovo senza mani e hand-switch volume che richiede skip frame.
+- [ ] Implementare il processor usando `RuntimeSession` come stato scalare condiviso.
+- [ ] Sostituire il ramo `new_mp` nel runtime con una singola chiamata.
+- [ ] Tenere `handtracking_frame.py` sotto 300 righe spostando il coordinamento delle modalita' in `handtracking_modes.py`.
+- [ ] Suite completa e commit `refactor: extract mediapipe frame processor`.
+
 **Files:**
 - Modify: `handtracking_runtime.py`
 - Modify: `README.md`

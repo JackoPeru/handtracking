@@ -12,6 +12,8 @@ Ridurre ulteriormente i file grandi senza cambiare gesture, soglie o comportamen
 - `handtracking_volume.py`: macchina a stati volume candidate/lock/release, inclusi freeze e callback di lettura/scrittura volume.
 - `handtracking_scroll.py`: arm/release dello scroll MediaPipe. Il movimento wheel camera-rate resta in `handtracking_flow.py`.
 - `handtracking_spock.py`: macchina a stati Spock oggi contenuta in `handtracking_processing.py`.
+- `handtracking_frame.py`: orchestrazione di un nuovo risultato MediaPipe; aggiorna `RuntimeSession` e richiama handler/processing gia' separati senza possedere camera o worker.
+- `handtracking_modes.py`: coordina two-hand, radial, swipe, pointer, volume/scroll e fallback cursore per il risultato MediaPipe gia' analizzato.
 - `handtracking_processing.py`: analisi mano, handedness, clutch fist, swipe, EMA e precision snap.
 - `handtracking_runtime.py`: loop, ordine delle fasi, wiring tra moduli e rendering finale.
 
@@ -27,7 +29,7 @@ Ridurre ulteriormente i file grandi senza cambiare gesture, soglie o comportamen
 
 ## Target structure
 
-`handtracking_runtime.py` coordina una `RuntimeSession` e un `CameraRuntime`, consuma un frame per iterazione, applica tracking fail-safe, optical flow, nuovo risultato MediaPipe, gesture handlers, snap, rendering e uscita.
+`handtracking_runtime.py` coordina una `RuntimeSession` e un `CameraRuntime`, consuma un frame per iterazione, applica tracking fail-safe e optical flow, delega i nuovi risultati MediaPipe a `handtracking_frame.py`, quindi esegue snap, rendering e uscita.
 
 Il runtime non deve piu' contenere setup dettagliato camera/worker/state, reset stale/no-hand, macchina volume/scroll o macchina Spock.
 
@@ -36,6 +38,7 @@ Il runtime non deve piu' contenere setup dettagliato camera/worker/state, reset 
 - `handtracking_runtime.py` tra 350 e 500 righe, salvo motivazione tecnica documentata.
 - `_run_impl()` sotto 400 righe.
 - `handtracking_processing.py` sotto 300 righe.
+- `handtracking_frame.py` sotto 300 righe; il coordinamento gesture resta in `handtracking_modes.py` invece di ricreare un secondo monolite.
 - Suite completa verde con almeno gli 82 test esistenti piu' i nuovi regression test.
 - `py_compile`, `pip check`, `git diff --check`, secret scan e audit AST puliti.
 - Smoke reale di caricamento modello e worker MediaPipe.

@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "handtracking_runtime.py").read_text(encoding="utf-8")
+FRAME_SOURCE = (ROOT / "handtracking_frame.py").read_text(encoding="utf-8")
+MODES_SOURCE = (ROOT / "handtracking_modes.py").read_text(encoding="utf-8")
 WORKER_SOURCE = (ROOT / "handtracking_mediapipe.py").read_text(encoding="utf-8")
 CAMERA_SOURCE = (ROOT / "handtracking_camera.py").read_text(encoding="utf-8")
 SESSION_SOURCE = (ROOT / "handtracking_session.py").read_text(encoding="utf-8")
@@ -18,7 +20,7 @@ HUD_SOURCE = (
 class SourceContractTests(unittest.TestCase):
     def test_runtime_imports_extracted_config_and_gesture_classifiers(self):
         self.assertIn("from handtracking_config import", SOURCE)
-        self.assertIn("from handtracking_gestures import", SOURCE)
+        self.assertIn("from handtracking_gestures import", FRAME_SOURCE)
         self.assertNotIn("CAMERA_W, CAMERA_H =", SOURCE)
         for function_name in (
             "dist", "dist3", "joint_angle3", "control_point",
@@ -50,14 +52,10 @@ class SourceContractTests(unittest.TestCase):
                 self.assertNotIn(f"def {function_name}(", SOURCE)
 
     def test_runtime_uses_phase_two_processing_modules(self):
-        for import_text in (
-            "from handtracking_flow import",
-            "from handtracking_handlers import",
-            "from handtracking_hud import",
-            "from handtracking_processing import",
-        ):
-            with self.subTest(import_text=import_text):
-                self.assertIn(import_text, SOURCE)
+        self.assertIn("from handtracking_flow import", SOURCE)
+        self.assertIn("from handtracking_hud import", SOURCE)
+        self.assertIn("from handtracking_processing import", SOURCE)
+        self.assertIn("from handtracking_handlers import", MODES_SOURCE)
         self.assertNotIn("calcOpticalFlowPyrLK", SOURCE)
         self.assertNotIn("cv2.putText", SOURCE)
 
@@ -68,13 +66,17 @@ class SourceContractTests(unittest.TestCase):
         self.assertNotIn("CursorController()", SOURCE)
         self.assertNotIn("HandLandmarkerOptions(", SOURCE)
 
-    def test_runtime_orchestrator_stays_below_phase_two_size_budget(self):
+    def test_runtime_orchestrator_stays_below_phase_three_size_budget(self):
         tree = ast.parse(SOURCE)
         run_impl = next(
             node for node in tree.body
             if isinstance(node, ast.FunctionDef) and node.name == "_run_impl"
         )
-        self.assertLess(run_impl.end_lineno - run_impl.lineno + 1, 800)
+        self.assertLess(run_impl.end_lineno - run_impl.lineno + 1, 400)
+
+    def test_mediapipe_frame_orchestrator_stays_focused(self):
+        self.assertIn("from handtracking_modes import", FRAME_SOURCE)
+        self.assertLess(len(FRAME_SOURCE.splitlines()), 300)
 
     def test_media_pipe_queue_does_not_copy_fresh_frames(self):
         self.assertNotIn(

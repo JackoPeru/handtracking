@@ -62,6 +62,51 @@ class SpockProcessingTests(unittest.TestCase):
         self.assertFalse(state.latched)
         self.assertFalse(state.blocking)
 
+    def test_no_hand_update_releases_latched_spock_after_grace(self):
+        from handtracking_config import SPOCK_RELEASE_SECONDS
+        from handtracking_spock import update_spock_without_hands
+
+        state = SpockState(latched=True, blocking=True, progress=1.0)
+        first = update_spock_without_hands(
+            state,
+            now=5.0,
+            input_block_until=0.0,
+        )
+        self.assertTrue(state.latched)
+        self.assertEqual(state.release_at, 5.0)
+
+        second = update_spock_without_hands(
+            state,
+            now=5.0 + SPOCK_RELEASE_SECONDS + 0.01,
+            input_block_until=first,
+        )
+        self.assertFalse(state.latched)
+        self.assertFalse(state.blocking)
+        self.assertGreater(second, 5.0)
+
+    def test_no_hand_update_clears_expired_candidate(self):
+        from handtracking_config import SPOCK_MISS_GRACE
+        from handtracking_spock import update_spock_without_hands
+
+        state = SpockState(
+            candidate_at=2.0,
+            last_seen=2.0,
+            blocking=True,
+            progress=0.5,
+            confirmed_seconds=0.5,
+        )
+
+        update_spock_without_hands(
+            state,
+            now=2.0 + SPOCK_MISS_GRACE + 0.01,
+            input_block_until=0.0,
+        )
+
+        self.assertIsNone(state.candidate_at)
+        self.assertIsNone(state.last_seen)
+        self.assertFalse(state.blocking)
+        self.assertEqual(state.progress, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
