@@ -37,6 +37,24 @@ class CoreBehaviorTests(unittest.TestCase):
             input_blocked=False,
         ))
 
+    def test_pointer_gate_blocks_volume_candidate(self):
+        core = load_core()
+        self.assertIsNotNone(core)
+        self.assertFalse(core.pointer_mode_allowed(
+            commands_enabled=True,
+            spock_blocking=False,
+            hand_count=1,
+            paused=False,
+            volume_active=False,
+            volume_candidate=True,
+            two_hand_active=False,
+            two_hand_candidate=False,
+            radial_active=False,
+            scroll_active=False,
+            swipe_tracking=False,
+            input_blocked=False,
+        ))
+
     def test_spock_hold_does_not_credit_missing_time(self):
         core = load_core()
         self.assertIsNotNone(core)
@@ -45,6 +63,29 @@ class CoreBehaviorTests(unittest.TestCase):
         accumulated = core.advance_confirmed_hold(accumulated, False, 0.60, 1.0)
         accumulated = core.advance_confirmed_hold(accumulated, True, 0.05, 1.0)
         self.assertAlmostEqual(accumulated, 0.10, places=6)
+
+    def test_spock_release_gate_stays_armed_until_pose_is_released(self):
+        core = load_core()
+        self.assertIsNotNone(core)
+
+        self.assertTrue(core.spock_release_gate_active(
+            required=True,
+            detected=True,
+            release_elapsed=1.0,
+            release_seconds=0.22,
+        ))
+        self.assertTrue(core.spock_release_gate_active(
+            required=True,
+            detected=False,
+            release_elapsed=0.10,
+            release_seconds=0.22,
+        ))
+        self.assertFalse(core.spock_release_gate_active(
+            required=True,
+            detected=False,
+            release_elapsed=0.23,
+            release_seconds=0.22,
+        ))
 
     def test_hand_identity_prefers_same_handedness_when_crossing(self):
         core = load_core()

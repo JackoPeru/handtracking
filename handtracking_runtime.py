@@ -21,6 +21,7 @@ from handtracking_core import (
     normalized_points_pixel_distance,
     palm_motion_scale,
     pointer_mode_allowed,
+    spock_release_gate_active,
     tracking_result_is_stale,
 )
 from handtracking_mediapipe import MediaPipeWorker
@@ -1089,6 +1090,7 @@ def _run_impl(cleanup):
     spock_last_seen = None
     spock_release_at = None
     spock_latched = False
+    spock_release_required = False
     spock_blocking = False
     spock_progress = 0.0
     spock_confirmed_seconds = 0.0
@@ -1153,11 +1155,12 @@ def _run_impl(cleanup):
         )
 
         if mp_result_stale:
+            spock_release_required = spock_release_required or spock_latched
             spock_candidate_at = None
             spock_last_seen = None
             spock_release_at = None
             spock_latched = False
-            spock_blocking = False
+            spock_blocking = spock_release_required
             spock_progress = 0.0
             spock_confirmed_seconds = 0.0
             spock_score_history.clear()
@@ -1281,7 +1284,8 @@ def _run_impl(cleanup):
                             swipe_motion_consumed = False
                             swipe_base_gate = (
                                 not pointer_pinch_held and
-                                not volume_active and not two_hand_active and not radial_active and
+                                not volume_active and volume_candidate_at is None and
+                                not two_hand_active and not radial_active and
                                 not scroll_active and two_hand_candidate_at is None and
                                 now >= swipe_cooldown_until
                             )
@@ -1530,7 +1534,30 @@ def _run_impl(cleanup):
                         1.0 / 120.0,
                     ),
                 )
-                if spock_now:
+                if spock_release_required:
+                    spock_blocking = True
+                    spock_progress = 1.0
+                    if spock_now:
+                        spock_release_at = None
+                    else:
+                        if spock_release_at is None:
+                            spock_release_at = now
+                        release_elapsed = now - spock_release_at
+                        if not spock_release_gate_active(
+                                required=True,
+                                detected=False,
+                                release_elapsed=release_elapsed,
+                                release_seconds=SPOCK_RELEASE_SECONDS):
+                            spock_release_required = False
+                            spock_blocking = False
+                            spock_release_at = None
+                            spock_progress = 0.0
+                            spock_confirmed_seconds = 0.0
+                            gesture_input_block_until = max(
+                                gesture_input_block_until,
+                                now + SPOCK_POST_RELEASE_BLOCK,
+                            )
+                elif spock_now:
                     spock_release_at = None
                     spock_last_seen = now
                     spock_blocking = True
@@ -1780,7 +1807,8 @@ def _run_impl(cleanup):
                 two_hand_held = False
                 pair_geometry = None
                 if (len(hands) >= 2 and commands_enabled and not spock_blocking and
-                        not paused_by_fist and not volume_active):
+                        not paused_by_fist and not volume_active and
+                        volume_candidate_at is None and not volume_candidate_now):
                     pair_hands = sorted(hands[:2], key=lambda h: control_point(h)[0])
                     pair_geometry = two_hand_geometry(pair_hands[0], pair_hands[1])
                     pinch_limit = TWO_HAND_PINCH_OFF if two_hand_active else TWO_HAND_PINCH_ON
@@ -1948,7 +1976,8 @@ def _run_impl(cleanup):
                     open_now = is_radial_open_pose(control_class_hand)
                     radial_can_arm = (
                         open_now and not scroll_active and not swipe_tracking and
-                        not volume_candidate_now and now >= gesture_input_block_until
+                        not volume_candidate_now and volume_candidate_at is None and
+                        now >= gesture_input_block_until
                     )
                     if radial_can_arm:
                         current_anchor = points[control_index]
@@ -1991,6 +2020,7 @@ def _run_impl(cleanup):
                 swipe_allowed = (
                     commands_enabled and not spock_blocking and len(hands) == 1 and
                     not paused_by_fist and not volume_active and
+                    not volume_candidate_now and volume_candidate_at is None and
                     not two_hand_active and two_hand_candidate_at is None and
                     not radial_active and not scroll_active and
                     now >= gesture_input_block_until
@@ -2031,6 +2061,9 @@ def _run_impl(cleanup):
                     scroll_active=scroll_active,
                     swipe_tracking=swipe_tracking,
                     input_blocked=now < gesture_input_block_until,
+                    volume_candidate=(
+                        volume_candidate_now or volume_candidate_at is not None
+                    ),
                 )
                 pointer_ratio = normalized_pinch_ratio(control_hand, 8)
                 pointer_fingers_valid = pointer_other_fingers_valid(control_hand)

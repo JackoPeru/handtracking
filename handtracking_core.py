@@ -4,10 +4,10 @@ import math
 def pointer_mode_allowed(*, commands_enabled, spock_blocking, hand_count,
                          paused, volume_active, two_hand_active,
                          two_hand_candidate, radial_active, scroll_active,
-                         swipe_tracking, input_blocked):
+                         swipe_tracking, input_blocked, volume_candidate=False):
     return (
         commands_enabled and not spock_blocking and hand_count == 1 and
-        not paused and not volume_active and not two_hand_active and
+        not paused and not volume_active and not volume_candidate and not two_hand_active and
         not two_hand_candidate and not radial_active and not scroll_active and
         not swipe_tracking and not input_blocked
     )
@@ -19,6 +19,16 @@ def advance_confirmed_hold(accumulated, detected, sample_seconds, hold_seconds):
         return accumulated
     sample_seconds = max(0.0, sample_seconds)
     return min(max(hold_seconds, 0.0), accumulated + sample_seconds)
+
+
+def spock_release_gate_active(*, required, detected,
+                              release_elapsed, release_seconds):
+    """Keep the Spock gate armed until a fresh non-Spock pose is held long enough."""
+    if not required:
+        return False
+    if detected:
+        return True
+    return max(float(release_elapsed), 0.0) < max(float(release_seconds), 0.0)
 
 
 def choose_control_index(points, labels, previous_point=None, previous_label=None,
