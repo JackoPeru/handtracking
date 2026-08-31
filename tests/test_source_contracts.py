@@ -22,6 +22,21 @@ class SourceContractTests(unittest.TestCase):
             with self.subTest(function_name=function_name):
                 self.assertNotIn(f"def {function_name}(", SOURCE)
 
+    def test_runtime_uses_extracted_windows_and_render_modules(self):
+        self.assertIn("from handtracking_windows import", SOURCE)
+        self.assertIn("from handtracking_render import", SOURCE)
+        self.assertNotIn("ctypes.windll.user32", SOURCE)
+        self.assertNotIn("AudioUtilities.GetSpeakers", SOURCE)
+        for function_name in (
+            "mouse_down", "mouse_up", "mouse_wheel", "key_down", "key_up",
+            "tap_combo", "ctrl_wheel", "foreground_window_title",
+            "execute_swipe", "execute_radial_action", "get_system_volume",
+            "set_system_volume", "left_click", "cursor_worker",
+            "draw_hand", "draw_radial_menu", "draw_two_hand_transform",
+        ):
+            with self.subTest(function_name=function_name):
+                self.assertNotIn(f"def {function_name}(", SOURCE)
+
     def test_media_pipe_queue_does_not_copy_fresh_frames(self):
         self.assertNotIn(
             "mp_pending = (detect_frame.copy(), gray.copy()",

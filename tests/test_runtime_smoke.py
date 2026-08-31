@@ -83,12 +83,47 @@ class FakeWorker:
         self.joined = True
 
 
+class FakeCursor:
+    def __init__(self):
+        self.closed = False
+        self.started = False
+        self._active = False
+        self._position = (100, 100)
+
+    @property
+    def active(self):
+        return self._active
+
+    def screen_size(self):
+        return 1920, 1080
+
+    def position(self):
+        return self._position
+
+    def set_position(self, x, y):
+        self._position = (int(round(x)), int(round(y)))
+
+    def sync(self, active):
+        self._active = bool(active)
+
+    def add_delta(self, dx, dy, *, screen_size=None):
+        self._position = (self._position[0] + dx, self._position[1] + dy)
+
+    def start(self):
+        self.started = True
+
+    def close(self):
+        self.closed = True
+        self._active = False
+
+
 class RuntimeSmokeTests(unittest.TestCase):
     def test_no_hand_runtime_starts_and_cleans_up_without_real_devices(self):
         import handtracking_runtime as runtime
 
         capture = FakeCapture()
         worker = FakeWorker()
+        cursor = FakeCursor()
 
         with (
             mock.patch.object(runtime.cv2, "VideoCapture", return_value=capture),
@@ -98,20 +133,22 @@ class RuntimeSmokeTests(unittest.TestCase):
             mock.patch.object(runtime.cv2, "waitKey", return_value=-1),
             mock.patch.object(runtime.cv2, "destroyAllWindows"),
             mock.patch.object(runtime, "MediaPipeWorker", return_value=worker),
-            mock.patch.object(runtime, "cursor_position", return_value=(100, 100)),
+            mock.patch.object(runtime, "CursorController", return_value=cursor),
         ):
             runtime.run()
 
         self.assertTrue(worker.stopped)
         self.assertTrue(worker.joined)
         self.assertTrue(capture.released)
-        self.assertTrue(runtime.cursor_stop)
+        self.assertTrue(cursor.started)
+        self.assertTrue(cursor.closed)
 
     def test_runtime_cleans_up_all_resources_when_loop_raises(self):
         import handtracking_runtime as runtime
 
         capture = FakeCapture(frames=1)
         worker = FakeWorker()
+        cursor = FakeCursor()
         destroyed = mock.Mock()
 
         with (
@@ -121,7 +158,7 @@ class RuntimeSmokeTests(unittest.TestCase):
             mock.patch.object(runtime.cv2, "resize", side_effect=RuntimeError("synthetic crash")),
             mock.patch.object(runtime.cv2, "destroyAllWindows", destroyed),
             mock.patch.object(runtime, "MediaPipeWorker", return_value=worker),
-            mock.patch.object(runtime, "cursor_position", return_value=(100, 100)),
+            mock.patch.object(runtime, "CursorController", return_value=cursor),
         ):
             with self.assertRaisesRegex(RuntimeError, "synthetic crash"):
                 runtime.run()
@@ -129,7 +166,7 @@ class RuntimeSmokeTests(unittest.TestCase):
         self.assertTrue(worker.stopped)
         self.assertTrue(worker.joined)
         self.assertTrue(capture.released)
-        self.assertTrue(runtime.cursor_stop)
+        self.assertTrue(cursor.closed)
         destroyed.assert_called_once()
 
     def test_runtime_exits_if_mediapipe_worker_dies(self):
@@ -149,6 +186,7 @@ class RuntimeSmokeTests(unittest.TestCase):
 
         capture = FakeCapture(frames=2)
         worker = DeadWorker()
+        cursor = FakeCursor()
 
         with (
             mock.patch.object(runtime.cv2, "VideoCapture", return_value=capture),
@@ -158,7 +196,7 @@ class RuntimeSmokeTests(unittest.TestCase):
             mock.patch.object(runtime.cv2, "waitKey", return_value=-1),
             mock.patch.object(runtime.cv2, "destroyAllWindows"),
             mock.patch.object(runtime, "MediaPipeWorker", return_value=worker),
-            mock.patch.object(runtime, "cursor_position", return_value=(100, 100)),
+            mock.patch.object(runtime, "CursorController", return_value=cursor),
         ):
             with self.assertRaisesRegex(RuntimeError, "MediaPipe worker stopped.*init failed"):
                 runtime.run()
@@ -166,6 +204,7 @@ class RuntimeSmokeTests(unittest.TestCase):
         self.assertTrue(worker.stopped)
         self.assertTrue(worker.joined)
         self.assertTrue(capture.released)
+        self.assertTrue(cursor.closed)
 
 
 if __name__ == "__main__":

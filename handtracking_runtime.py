@@ -1,8 +1,6 @@
 """Hand tracking runtime implementation."""
 
-import ctypes
 import math
-import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -10,7 +8,6 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 import numpy as np
-from pycaw.pycaw import AudioUtilities
 
 from handtracking_core import (
     advance_confirmed_hold,
@@ -50,6 +47,16 @@ from handtracking_gestures import (
     two_hand_geometry,
     wrapped_angle_delta,
 )
+from handtracking_render import draw_hand, draw_radial_menu, draw_two_hand_transform
+from handtracking_windows import (
+    CursorController,
+    ctrl_wheel,
+    execute_radial_action,
+    execute_swipe,
+    get_system_volume,
+    left_click,
+    set_system_volume,
+)
 
 # L'optical flow usa pochissimi punti e non beneficia di 8 thread OpenCV.
 # Limitarlo evita contesa CPU con MediaPipe/XNNPACK sul portatile 4C/8T.
@@ -60,36 +67,8 @@ HandLandmarker = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
-HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),
-    (0, 5), (5, 6), (6, 7), (7, 8),
-    (5, 9), (9, 10), (10, 11), (11, 12),
-    (9, 13), (13, 14), (14, 15), (15, 16),
-    (13, 17), (17, 18), (18, 19), (19, 20), (0, 17),
-]
 # Optical flow sul palmo: punti rigidi che non si spostano quando pieghi le dita.
 # Questo evita il salto del cursore durante click/pinch/drag.
-
-user32 = ctypes.windll.user32
-try:
-    user32.SetProcessDPIAware()
-except Exception:
-    pass
-
-SCREEN_W = user32.GetSystemMetrics(0)
-SCREEN_H = user32.GetSystemMetrics(1)
-MOUSEEVENTF_LEFTDOWN = 0x0002
-MOUSEEVENTF_LEFTUP = 0x0004
-MOUSEEVENTF_WHEEL = 0x0800
-KEYEVENTF_KEYUP = 0x0002
-VK_CONTROL = 0x11
-VK_MENU = 0x12
-VK_TAB = 0x09
-VK_LEFT = 0x25
-VK_LWIN = 0x5B
-VK_D = 0x44
-VK_BROWSER_BACK = 0xA6
-VK_BROWSER_FORWARD = 0xA7
 
 
 def smoothstep01(value):
@@ -112,170 +91,15 @@ def cursor_gain_for_speed(speed_px_s):
     return CURSOR_GAIN_NORMAL + (CURSOR_GAIN_FLICK - CURSOR_GAIN_NORMAL) * t
 
 
-def mouse_down():
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-
-
-def mouse_up():
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-
-
-def mouse_wheel(delta):
-    wheel_data = ctypes.c_uint32(int(delta) & 0xFFFFFFFF).value
-    user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, wheel_data, 0)
-
-
-def key_down(vk):
-    user32.keybd_event(vk, 0, 0, 0)
-
-
-def key_up(vk):
-    user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
-
-
-def tap_combo(vk, modifiers=()):
-    for mod in modifiers:
-        key_down(mod)
-    key_down(vk)
-    key_up(vk)
-    for mod in reversed(modifiers):
-        key_up(mod)
-
-
-def ctrl_wheel(delta):
-    key_down(VK_CONTROL)
-    try:
-        mouse_wheel(delta)
-    finally:
-        key_up(VK_CONTROL)
-
-
-def foreground_window_title():
-    hwnd = user32.GetForegroundWindow()
-    if not hwnd:
-        return "?"
-    length = user32.GetWindowTextLengthW(hwnd)
-    buf = ctypes.create_unicode_buffer(max(length + 1, 2))
-    user32.GetWindowTextW(hwnd, buf, len(buf))
-    return buf.value or "?"
-
-
-def execute_swipe(direction):
-    # Usa i tasti hardware Browser Back/Forward: sono piu' diretti di Alt+freccia
-    # e vengono riconosciuti nativamente da Chrome/Edge/Firefox.
-    target = foreground_window_title()
-    if direction == "LEFT":
-        tap_combo(VK_BROWSER_BACK)
-        return f"BACK SENT -> {target[:28]}"
-    if direction == "RIGHT":
-        tap_combo(VK_BROWSER_FORWARD)
-        return f"FORWARD SENT -> {target[:28]}"
-    return ""
-
-
-def execute_radial_action(action):
-    if action == "LEFT":
-        tap_combo(VK_LEFT, (VK_MENU,))
-        return "BACK"
-    if action == "RIGHT":
-        tap_combo(VK_TAB, (VK_MENU,))
-        return "NEXT APP"
-    if action == "UP":
-        tap_combo(VK_TAB, (VK_LWIN,))
-        return "TASK VIEW"
-    if action == "DOWN":
-        tap_combo(VK_D, (VK_LWIN,))
-        return "DESKTOP"
-    return ""
-
-
-try:
-    volume_endpoint = AudioUtilities.GetSpeakers().EndpointVolume
-except Exception:
-    volume_endpoint = None
-
-
-def get_system_volume():
-    if volume_endpoint is None:
-        return 0.5
-    return float(volume_endpoint.GetMasterVolumeLevelScalar())
-
-
-def set_system_volume(value):
-    if volume_endpoint is not None:
-        volume_endpoint.SetMasterVolumeLevelScalar(clamp(value, 0.0, 1.0), None)
-
-
-def left_click():
-    mouse_down()
-    mouse_up()
-
-
-class POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-def cursor_position():
-    point = POINT()
-    user32.GetCursorPos(ctypes.byref(point))
-    return point.x, point.y
-
-
-cursor_lock = threading.Lock()
-cursor_target = [0.0, 0.0]
-cursor_active = False
-cursor_stop = False
-
-
-def sync_cursor_target(active):
-    global cursor_active
-    x, y = cursor_position()
-    with cursor_lock:
-        cursor_target[0] = float(x)
-        cursor_target[1] = float(y)
-        cursor_active = active
-
-
-def add_cursor_delta(dx, dy):
-    with cursor_lock:
-        cursor_target[0] = clamp(cursor_target[0] + dx, 0, SCREEN_W - 1)
-        cursor_target[1] = clamp(cursor_target[1] + dy, 0, SCREEN_H - 1)
-
-def cursor_worker():
-    last = time.perf_counter()
-    while not cursor_stop:
-        now = time.perf_counter()
-        dt = max(now - last, 1.0 / 500.0)
-        last = now
-        with cursor_lock:
-            active = cursor_active
-            tx, ty = cursor_target
-        if active:
-            x, y = cursor_position()
-            alpha = 1.0 - math.exp(-dt / CURSOR_INTERP_TAU)
-            nx = x + (tx - x) * alpha
-            ny = y + (ty - y) * alpha
-            if abs(tx - x) > 0.5 or abs(ty - y) > 0.5:
-                user32.SetCursorPos(int(round(nx)), int(round(ny)))
-        time.sleep(1.0 / CURSOR_OUTPUT_HZ)
-
-
 class RuntimeCleanup:
     """Own runtime resources so cleanup is guaranteed by the public wrapper."""
 
     def __init__(self):
         self.capture = None
         self.mediapipe_worker = None
-        self.cursor_thread = None
+        self.cursor = None
 
     def close(self):
-        global cursor_stop
-
-        try:
-            sync_cursor_target(False)
-        except Exception:
-            pass
-
         worker = self.mediapipe_worker
         if worker is not None:
             try:
@@ -287,10 +111,9 @@ class RuntimeCleanup:
             except Exception:
                 pass
 
-        cursor_stop = True
-        if self.cursor_thread is not None:
+        if self.cursor is not None:
             try:
-                self.cursor_thread.join(timeout=0.25)
+                self.cursor.close()
             except Exception:
                 pass
 
@@ -304,62 +127,6 @@ class RuntimeCleanup:
             cv2.destroyAllWindows()
         except Exception:
             pass
-
-
-def draw_hand(frame, hand, pinch_active=False, paused=False, scrolling=False, volume_control=False):
-    h, w = frame.shape[:2]
-    pts = [(int(p.x * w), int(p.y * h)) for p in hand]
-    if volume_control:
-        line_color = point_color = (255, 0, 255)
-    elif paused:
-        line_color = point_color = (0, 165, 255)
-    elif scrolling:
-        line_color = point_color = (255, 180, 0)
-    elif pinch_active:
-        line_color = point_color = (0, 0, 255)
-    else:
-        line_color, point_color = (255, 255, 255), (0, 255, 0)
-    for a, b in HAND_CONNECTIONS:
-        cv2.line(frame, pts[a], pts[b], line_color, 3, cv2.LINE_AA)
-    for i, pt in enumerate(pts):
-        cv2.circle(frame, pt, 8 if i in (4, 8, 12) else 5, point_color, -1, cv2.LINE_AA)
-    if pinch_active:
-        mx, my = mouse_point(hand)
-        cv2.circle(frame, (int(mx * w), int(my * h)), 13, (0, 255, 255), 3, cv2.LINE_AA)
-
-
-def draw_radial_menu(frame, center, selected):
-    h, w = frame.shape[:2]
-    cx, cy = int(center[0] * w), int(center[1] * h)
-    radius = int(min(w, h) * 0.115)
-    cv2.circle(frame, (cx, cy), radius, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.circle(frame, (cx, cy), int(radius * 0.35), (180, 180, 180), 1, cv2.LINE_AA)
-    items = {
-        "UP": ((cx, cy - radius), "TASK"),
-        "RIGHT": ((cx + radius, cy), "APP"),
-        "DOWN": ((cx, cy + radius), "DESKTOP"),
-        "LEFT": ((cx - radius, cy), "BACK"),
-    }
-    for direction, (pt, label) in items.items():
-        active = direction == selected
-        color = (0, 255, 255) if active else (255, 255, 255)
-        thickness = 3 if active else 1
-        cv2.circle(frame, pt, 24 if active else 19, color, thickness, cv2.LINE_AA)
-        size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
-        cv2.putText(frame, label, (pt[0] - size[0] // 2, pt[1] + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
-
-
-def draw_two_hand_transform(frame, point_a, point_b):
-    h, w = frame.shape[:2]
-    a = (int(point_a[0] * w), int(point_a[1] * h))
-    b = (int(point_b[0] * w), int(point_b[1] * h))
-    cv2.line(frame, a, b, (255, 255, 0), 4, cv2.LINE_AA)
-    cv2.circle(frame, a, 14, (255, 255, 0), 3, cv2.LINE_AA)
-    cv2.circle(frame, b, 14, (255, 255, 0), 3, cv2.LINE_AA)
-    mx, my = (a[0] + b[0]) // 2, (a[1] + b[1]) // 2
-    cv2.putText(frame, "ZOOM", (mx - 42, my - 16),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2, cv2.LINE_AA)
 
 
 def flow_points_from_hand(hand):
@@ -399,8 +166,6 @@ options = HandLandmarkerOptions(
 )
 
 def _run_impl(cleanup):
-    global cursor_stop
-    cursor_stop = False
     cap = cv2.VideoCapture(0, cv2.CAP_MSMF)
     cleanup.capture = cap
     if not cap.isOpened():
@@ -440,10 +205,11 @@ def _run_impl(cleanup):
     )
     cleanup.mediapipe_worker = mp_worker
     mp_worker.start()
-    sync_cursor_target(False)
-    cursor_thread = threading.Thread(target=cursor_worker, daemon=True)
-    cleanup.cursor_thread = cursor_thread
-    cursor_thread.start()
+    cursor = CursorController()
+    cleanup.cursor = cursor
+    screen_w, screen_h = cursor.screen_size()
+    cursor.sync(False)
+    cursor.start()
 
     flow_prev_gray = None
     flow_points = None
@@ -669,7 +435,7 @@ def _run_impl(cleanup):
             snap_anchor = None
             snap_started_at = None
             precision_snap_active = False
-            sync_cursor_target(False)
+            cursor.sync(False)
 
         # Optical flow: misura il movimento su ogni frame della webcam.
         if flow_prev_gray is not None and flow_points is not None:
@@ -742,7 +508,7 @@ def _run_impl(cleanup):
                                     swipe_flow_started_at = now
                                     swipe_flow_accum_x = 0.0
                                     swipe_flow_accum_y = 0.0
-                                    sync_cursor_target(False)
+                                    cursor.sync(False)
                                     flow_virtual[:] = 0.0
                                     flow_filtered[:] = 0.0
                                     flow_prev_filtered[:] = 0.0
@@ -772,7 +538,7 @@ def _run_impl(cleanup):
                                         swipe_flow_started_at = None
                                         swipe_flow_accum_x = 0.0
                                         swipe_flow_accum_y = 0.0
-                                        sync_cursor_target(True)
+                                        cursor.sync(True)
                                         flow_virtual[:] = 0.0
                                         flow_filtered[:] = 0.0
                                         flow_prev_filtered[:] = 0.0
@@ -782,7 +548,7 @@ def _run_impl(cleanup):
                                         swipe_flow_started_at = None
                                         swipe_flow_accum_x = 0.0
                                         swipe_flow_accum_y = 0.0
-                                        sync_cursor_target(True)
+                                        cursor.sync(True)
                                         flow_virtual[:] = 0.0
                                         flow_filtered[:] = 0.0
                                         flow_prev_filtered[:] = 0.0
@@ -794,7 +560,7 @@ def _run_impl(cleanup):
                                 swipe_flow_started_at = None
                                 swipe_flow_accum_x = 0.0
                                 swipe_flow_accum_y = 0.0
-                                sync_cursor_target(True)
+                                cursor.sync(True)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
                                 flow_prev_filtered[:] = 0.0
@@ -829,7 +595,7 @@ def _run_impl(cleanup):
                                 if (not pointer_move_active and
                                         pointer_flow_travel >= POINTER_MOVE_TRIGGER_PX):
                                     pointer_move_active = True
-                                    sync_cursor_target(True)
+                                    cursor.sync(True)
                                     # Il movimento che ha superato la soglia serve solo a
                                     # distinguere move da click: riancora qui per evitare salti.
                                     flow_virtual[:] = 0.0
@@ -865,9 +631,9 @@ def _run_impl(cleanup):
                                                 )
                                                 out = out * (ramp * ramp)
                                             dynamic_gain = cursor_gain_for_speed(speed)
-                                            dx = (out[0] / DETECTION_W * SCREEN_W * MOVE_GAIN *
+                                            dx = (out[0] / DETECTION_W * screen_w * MOVE_GAIN *
                                                   MOVEMENT_MULTIPLIER * dynamic_gain)
-                                            dy = (out[1] / DETECTION_H * SCREEN_H * MOVE_GAIN *
+                                            dy = (out[1] / DETECTION_H * screen_h * MOVE_GAIN *
                                                   MOVEMENT_MULTIPLIER * dynamic_gain)
                                             screen_step = math.hypot(float(dx), float(dy))
                                             if precision_snap_active:
@@ -878,11 +644,11 @@ def _run_impl(cleanup):
                                                     precision_snap_active = False
                                                     snap_anchor = None
                                                     snap_started_at = None
-                                            add_cursor_delta(float(dx), float(dy))
+                                            cursor.add_delta(float(dx), float(dy), screen_size=(screen_w, screen_h))
                             else:
                                 # Mano aperta o qualsiasi posa senza pinch: cursore fermo.
-                                if cursor_active:
-                                    sync_cursor_target(False)
+                                if cursor.active:
+                                    cursor.sync(False)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
                                 flow_prev_filtered[:] = 0.0
@@ -1039,7 +805,7 @@ def _run_impl(cleanup):
                             control_handedness = None
                             flow_points = None
                             flow_active = False
-                            sync_cursor_target(False)
+                            cursor.sync(False)
                     elif (spock_candidate_at is not None and spock_last_seen is not None and
                           now - spock_last_seen <= SPOCK_MISS_GRACE):
                         spock_blocking = True
@@ -1097,7 +863,7 @@ def _run_impl(cleanup):
                     flow_filtered[:] = 0.0
                     flow_prev_filtered[:] = 0.0
                     flow_time = None
-                    sync_cursor_target(False)
+                    cursor.sync(False)
 
                 class_metrics = [grip_class_scores(hand) for hand in class_hands]
                 norm_metrics = [grip_class_scores(hand) for hand in hands]
@@ -1172,7 +938,7 @@ def _run_impl(cleanup):
                         volume_vote_history.clear()
                         mp_control_ref = None
                         control_handedness = None
-                        sync_cursor_target(False)
+                        cursor.sync(False)
                     continue
 
                 last_hand_seen = now
@@ -1277,7 +1043,7 @@ def _run_impl(cleanup):
                             volume_candidate_at = None
                             volume_candidate_last_seen = None
                             volume_vote_history.clear()
-                            sync_cursor_target(False)
+                            cursor.sync(False)
                             flow_virtual[:] = 0.0
                             flow_filtered[:] = 0.0
                             flow_prev_filtered[:] = 0.0
@@ -1314,7 +1080,7 @@ def _run_impl(cleanup):
                         two_hand_zoom_residual = 0.0
                         two_hand_points = None
                         gesture_input_block_until = now + 0.16
-                        sync_cursor_target(True)
+                        cursor.sync(True)
                         flow_virtual[:] = 0.0
                         flow_filtered[:] = 0.0
                         flow_prev_filtered[:] = 0.0
@@ -1373,7 +1139,7 @@ def _run_impl(cleanup):
                             radial_selection_since = None
                             radial_release_at = None
                             radial_pinch_candidate_at = None
-                            sync_cursor_target(True)
+                            cursor.sync(True)
                             flow_virtual[:] = 0.0
                             flow_filtered[:] = 0.0
                             flow_prev_filtered[:] = 0.0
@@ -1401,7 +1167,7 @@ def _run_impl(cleanup):
                                 radial_pinch_latched = False
                                 radial_pinch_candidate_at = None
                                 gesture_input_block_until = now + 0.12
-                                sync_cursor_target(True)
+                                cursor.sync(True)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
                                 flow_prev_filtered[:] = 0.0
@@ -1440,7 +1206,7 @@ def _run_impl(cleanup):
                                 scroll_candidate_at = None
                                 scroll_release_at = None
                                 scroll_residual = 0.0
-                                sync_cursor_target(False)
+                                cursor.sync(False)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
                                 flow_prev_filtered[:] = 0.0
@@ -1515,13 +1281,13 @@ def _run_impl(cleanup):
                         pointer_motion_accum[:] = 0.0
                         pointer_flow_travel = 0.0
                         pointer_cursor_origin = None
-                        sync_cursor_target(False)
+                        cursor.sync(False)
                     elif pointer_ratio > POINTER_PINCH_OFF:
                         # Congela immediatamente il cursore appena il pinch e' chiaramente
                         # aperto. La grace sotto serve solo a confermare il rilascio.
                         pointer_release_braking = True
                         pointer_move_active = False
-                        sync_cursor_target(False)
+                        cursor.sync(False)
                         flow_virtual[:] = 0.0
                         flow_filtered[:] = 0.0
                         flow_prev_filtered[:] = 0.0
@@ -1538,10 +1304,10 @@ def _run_impl(cleanup):
                                 # Un click rapido non deve spostare il cursore nemmeno
                                 # se i primi frame del pinch hanno prodotto un po' di jitter.
                                 if pointer_cursor_origin is not None:
-                                    user32.SetCursorPos(
-                                        int(pointer_cursor_origin[0]), int(pointer_cursor_origin[1])
+                                    cursor.set_position(
+                                        pointer_cursor_origin[0], pointer_cursor_origin[1]
                                     )
-                                    sync_cursor_target(False)
+                                    cursor.sync(False)
                                 is_double_pinch = (
                                     last_click_at is not None and
                                     now - last_click_at <= DOUBLE_PINCH_WINDOW
@@ -1565,7 +1331,7 @@ def _run_impl(cleanup):
                             precision_snap_active = False
                             snap_anchor = None
                             snap_started_at = None
-                            sync_cursor_target(False)
+                            cursor.sync(False)
                             flow_virtual[:] = 0.0
                             flow_filtered[:] = 0.0
                             flow_prev_filtered[:] = 0.0
@@ -1576,7 +1342,7 @@ def _run_impl(cleanup):
                         pointer_release_braking = True
                         pointer_move_active = False
                         pointer_release_at = None
-                        sync_cursor_target(False)
+                        cursor.sync(False)
                         flow_virtual[:] = 0.0
                         flow_filtered[:] = 0.0
                         flow_prev_filtered[:] = 0.0
@@ -1592,13 +1358,13 @@ def _run_impl(cleanup):
                     pointer_release_braking = False
                     pointer_motion_accum[:] = 0.0
                     pointer_flow_travel = 0.0
-                    pointer_cursor_origin = cursor_position()
+                    pointer_cursor_origin = cursor.position()
                     swipe_tracking = False
                     swipe_flow_started_at = None
                     swipe_flow_accum_x = 0.0
                     swipe_flow_accum_y = 0.0
                     swipe_pose_last_seen = None
-                    sync_cursor_target(False)
+                    cursor.sync(False)
                     flow_virtual[:] = 0.0
                     flow_filtered[:] = 0.0
                     flow_prev_filtered[:] = 0.0
@@ -1673,7 +1439,7 @@ def _run_impl(cleanup):
                                 scroll_candidate_at = None
                                 scroll_release_at = None
                                 scroll_residual = 0.0
-                                sync_cursor_target(False)
+                                cursor.sync(False)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
                                 flow_prev_filtered[:] = 0.0
@@ -1714,7 +1480,7 @@ def _run_impl(cleanup):
                                 volume_last_angle = None
                                 volume_delta_history.clear()
                                 volume_vote_history.clear()
-                                sync_cursor_target(True)
+                                cursor.sync(True)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
                                 flow_prev_filtered[:] = 0.0
@@ -1734,7 +1500,7 @@ def _run_impl(cleanup):
                                 volume_pose_lost_at = None
                                 volume_last_angle = None
                                 volume_vote_history.clear()
-                                sync_cursor_target(True)
+                                cursor.sync(True)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
                                 flow_prev_filtered[:] = 0.0
@@ -1775,7 +1541,7 @@ def _run_impl(cleanup):
                                 scroll_active = True
                                 scroll_release_at = None
                                 scroll_residual = 0.0
-                                sync_cursor_target(False)
+                                cursor.sync(False)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
                                 flow_prev_filtered[:] = 0.0
@@ -1793,14 +1559,14 @@ def _run_impl(cleanup):
                                 scroll_candidate_at = None
                                 scroll_release_at = None
                                 scroll_residual = 0.0
-                                sync_cursor_target(True)
+                                cursor.sync(True)
                                 flow_virtual[:] = 0.0
                                 flow_filtered[:] = 0.0
                                 flow_prev_filtered[:] = 0.0
                                 flow_time = None
 
                 if paused_by_fist or not commands_enabled or spock_blocking:
-                    sync_cursor_target(False)
+                    cursor.sync(False)
                     flow_virtual[:] = 0.0
                     flow_filtered[:] = 0.0
                     flow_prev_filtered[:] = 0.0
@@ -1812,14 +1578,14 @@ def _run_impl(cleanup):
                     )
                     if (pointer_move_active and not exclusive_cursor_block and
                             now >= gesture_input_block_until and
-                            (old_pause or not cursor_active)):
-                        sync_cursor_target(True)
+                            (old_pause or not cursor.active)):
+                        cursor.sync(True)
                         flow_virtual[:] = 0.0
                         flow_filtered[:] = 0.0
                         flow_prev_filtered[:] = 0.0
                         flow_time = None
-                    elif not pointer_move_active and cursor_active:
-                        sync_cursor_target(False)
+                    elif not pointer_move_active and cursor.active:
+                        cursor.sync(False)
 
                     if (pointer_pinch_held and pointer_move_active and
                             not exclusive_cursor_block and corrected is None and
@@ -1839,8 +1605,8 @@ def _run_impl(cleanup):
                             )
                             fallback_speed = fmag * max(DETECTION_W, DETECTION_H) / fallback_dt
                             dynamic_gain = cursor_gain_for_speed(fallback_speed)
-                            dx = fdx * SCREEN_W * MOVE_GAIN * MOVEMENT_MULTIPLIER * dynamic_gain
-                            dy = fdy * SCREEN_H * MOVE_GAIN * MOVEMENT_MULTIPLIER * dynamic_gain
+                            dx = fdx * screen_w * MOVE_GAIN * MOVEMENT_MULTIPLIER * dynamic_gain
+                            dy = fdy * screen_h * MOVE_GAIN * MOVEMENT_MULTIPLIER * dynamic_gain
                             screen_step = math.hypot(float(dx), float(dy))
                             if precision_snap_active:
                                 if screen_step <= SNAP_BREAK_DELTA_PX:
@@ -1850,7 +1616,7 @@ def _run_impl(cleanup):
                                     precision_snap_active = False
                                     snap_anchor = None
                                     snap_started_at = None
-                            add_cursor_delta(float(dx), float(dy))
+                            cursor.add_delta(float(dx), float(dy), screen_size=(screen_w, screen_h))
             else:
                 debug_spock_score = 0.0
                 debug_fist_score = 0.0
@@ -1897,7 +1663,7 @@ def _run_impl(cleanup):
                 # dopo circa due frame e lo riancora quando MediaPipe rivede la mano.
                 if (pointer_move_active and
                         now - last_hand_seen > POINTER_TRACKING_LOSS_GRACE):
-                    sync_cursor_target(False)
+                    cursor.sync(False)
                     flow_points = None
                     flow_active = False
                     flow_virtual[:] = 0.0
@@ -1951,7 +1717,7 @@ def _run_impl(cleanup):
                     control_handedness = None
                     flow_points = None
                     flow_active = False
-                    sync_cursor_target(False)
+                    cursor.sync(False)
         # Se l'optical flow perde i punti, MediaPipe li riaggancia al prossimo risultato valido.
         if not flow_active and now - last_flow_success > TRACKING_LOSS_GRACE:
             flow_points = None
@@ -1967,7 +1733,7 @@ def _run_impl(cleanup):
             now >= gesture_input_block_until
         )
         if snap_allowed:
-            cursor_x, cursor_y = cursor_position()
+            cursor_x, cursor_y = cursor.position()
             if snap_anchor is None or snap_started_at is None:
                 snap_anchor = (float(cursor_x), float(cursor_y))
                 snap_started_at = now
