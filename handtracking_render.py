@@ -85,3 +85,36 @@ def draw_two_hand_transform(frame, point_a, point_b):
         2,
         cv2.LINE_AA,
     )
+
+
+def draw_runtime_overlays(
+    frame,
+    *,
+    latest_result,
+    fist_states,
+    control_index,
+    pinch_active,
+    scroll_active,
+    volume_active,
+    radial_active,
+    radial_center,
+    radial_selected,
+    two_hand_active,
+    two_hand_points,
+):
+    if latest_result is not None and latest_result.hand_landmarks:
+        for i, hand in enumerate(latest_result.hand_landmarks):
+            paused = fist_states[i] if i < len(fist_states) else False
+            draw_hand(
+                frame,
+                hand,
+                pinch_active=(i == control_index and pinch_active),
+                paused=paused,
+                scrolling=(i == control_index and scroll_active),
+                volume_control=(i == control_index and volume_active),
+            )
+
+    if radial_active and radial_center is not None:
+        draw_radial_menu(frame, radial_center, radial_selected)
+    if two_hand_active and two_hand_points is not None:
+        draw_two_hand_transform(frame, two_hand_points[0], two_hand_points[1])

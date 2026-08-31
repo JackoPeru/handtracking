@@ -28,9 +28,15 @@ from handtracking_flow import (
     propagate_points,
 )
 from handtracking_hud import draw_runtime_hud
-from handtracking_handlers import update_radial_state, update_two_hand_state
+from handtracking_handlers import (
+    update_pointer_state,
+    update_radial_state,
+    update_two_hand_state,
+)
 from handtracking_mediapipe import MediaPipeWorker
 from handtracking_processing import (
+    analyze_hand_frame,
+    update_hand_mode_metrics,
     update_ema_metrics,
     update_precision_snap,
     update_spock_state,
@@ -58,7 +64,7 @@ from handtracking_gestures import (
     two_hand_geometry,
     wrapped_angle_delta,
 )
-from handtracking_render import draw_hand, draw_radial_menu, draw_two_hand_transform
+from handtracking_render import draw_runtime_overlays
 from handtracking_state import (
     FlowState,
     PointerState,
@@ -406,64 +412,23 @@ def _run_impl(cleanup):
                     flow.clear_motion()
                     cursor.sync(False)
 
-                class_metrics = [grip_class_scores(hand) for hand in class_hands]
-                norm_metrics = [grip_class_scores(hand) for hand in hands]
-                fist_scores_now = [m[0] for m in class_metrics]
-                volume_scores_now = [
-                    max(class_metrics[i][1], norm_metrics[i][1])
-                    for i in range(len(hands))
-                ]
-                gap_scores_now = [norm_metrics[i][2] for i in range(len(hands))]
-
-                points = [control_point(hand) for hand in hands]
-                handedness_result = getattr(latest_result, "handedness", None) or []
-                handedness_labels = []
-                for i in range(len(hands)):
-                    try:
-                        handedness_labels.append(
-                            handedness_result[i][0].category_name or ""
-                        )
-                    except (IndexError, AttributeError, TypeError):
-                        handedness_labels.append("")
                 old_mp_ref = mp_control_ref
-                control_index = choose_control_index(
-                    points,
-                    handedness_labels,
+                analysis = analyze_hand_frame(
+                    latest_result=latest_result,
+                    hands=hands,
+                    class_hands=class_hands,
                     previous_point=mp_control_ref,
                     previous_label=control_handedness,
-                )
-                control_distance = (
-                    0.0 if mp_control_ref is None else
-                    math.hypot(
-                        points[control_index][0] - mp_control_ref[0],
-                        points[control_index][1] - mp_control_ref[1],
-                    )
-                )
-                selected_handedness = handedness_labels[control_index]
-
-                # Il pugno e' un clutch globale: qualunque mano puo' metterci in pausa,
-                # mentre VOLUME LOCK richiede comunque un pugno forte per interrompersi.
-                raw_fist_states = [is_fist(hand) for hand in hands]
-                strong_fist_states = [is_strong_fist(hand) for hand in hands]
-                fist_evidence = fist_evidence_from_hands(
-                    raw_fists=raw_fist_states,
-                    strong_fists=strong_fist_states,
-                    volume_scores=volume_scores_now,
-                    gap_scores=gap_scores_now,
+                    paused_by_fist=paused_by_fist,
+                    fist_vote_history=fist_vote_history,
                     volume_active=volume.active,
-                    volume_score_on=VOLUME_SCORE_ON,
-                    suppress_gap=VOLUME_FIST_SUPPRESS_GAP,
                 )
-                old_pause = paused_by_fist
-                fist_vote_history.append(1.0 if fist_evidence else 0.0)
-                fist_votes_on = sum(v > 0.5 for v in fist_vote_history)
-                fist_pending = fist_votes_on >= FIST_PENDING_VOTES
-                if not paused_by_fist:
-                    if fist_votes_on >= FIST_VOTE_ON:
-                        paused_by_fist = True
-                else:
-                    if sum(v < 0.5 for v in fist_vote_history) >= FIST_VOTE_OFF:
-                        paused_by_fist = False
+                paused_by_fist = analysis.paused_by_fist
+                old_pause = analysis.old_pause
+                fist_pending = analysis.fist_pending
+                control_index = analysis.control_index
+                control_distance = analysis.control_distance
+                selected_handedness = analysis.selected_handedness
 
                 # Durante VOLUME LOCK non consentire un salto improvviso sull'altra mano.
                 if (volume.active and mp_control_ref is not None and
@@ -478,59 +443,26 @@ def _run_impl(cleanup):
                 last_hand_seen = now
                 if selected_handedness:
                     control_handedness = selected_handedness
-                control_hand = hands[control_index]
-                control_class_hand = class_hands[control_index]
-                palm_width_px = normalized_points_pixel_distance(
-                    (control_hand[5].x, control_hand[5].y),
-                    (control_hand[17].x, control_hand[17].y),
-                    DETECTION_W,
-                    DETECTION_H,
+                control_hand = analysis.control_hand
+                control_class_hand = analysis.control_class_hand
+                points = analysis.points
+                mode_metrics = update_hand_mode_metrics(
+                    analysis,
+                    hands=hands,
+                    volume=volume,
+                    flow=flow,
                 )
-                target_motion_scale = palm_motion_scale(
-                    palm_width_px,
-                    reference_width_px=PALM_REFERENCE_WIDTH_PX,
-                    minimum=PALM_SCALE_MIN,
-                    maximum=PALM_SCALE_MAX,
-                )
-                flow.motion_scale = flow.motion_scale * 0.82 + target_motion_scale * 0.18
-                debug_fist_score = max(fist_scores_now, default=0.0)
-                debug_volume_score = volume_scores_now[control_index]
-                debug_grip_gap = gap_scores_now[control_index]
-                debug_fist_folded, debug_fist_tightness = fist_fold_metrics(control_hand)
-                debug_strong_fist = strong_fist_states[control_index]
-
-                # Un singolo frame compatto non deve rendere difficile il volume.
-                # Solo quando il pugno e' coerente per almeno due frame congela
-                # temporaneamente il volume; al terzo voto entra nel clutch.
-                if fist_pending:
-                    volume.vote_history.clear()
-                    volume.last_angle = None
-                    volume.delta_history.clear()
-                else:
-                    volume.vote_history.append(debug_volume_score)
-
-                volume_gesture_now = (
-                    sum(s >= VOLUME_SCORE_ON for s in volume.vote_history) >= VOLUME_VOTE_ON
-                    and not paused_by_fist
-                    and not fist_pending
-                )
-                volume_candidate_now = (
-                    debug_volume_score >= VOLUME_SCORE_CANDIDATE
-                    and not paused_by_fist
-                    and not fist_pending
-                )
-                fist_states = [
-                    (paused_by_fist and raw_fist_states[i])
-                    for i in range(len(hands))
-                ]
-                scroll_states = [
-                    is_scroll_gesture(hand)
-                    and not paused_by_fist
-                    and not volume.active
-                    and not volume_candidate_now
-                    for hand in hands
-                ]
-                scroll_gesture_now = scroll_states[control_index] and not volume_gesture_now
+                volume_gesture_now = mode_metrics.volume_gesture_now
+                volume_candidate_now = mode_metrics.volume_candidate_now
+                fist_states = mode_metrics.fist_states
+                scroll_states = mode_metrics.scroll_states
+                scroll_gesture_now = mode_metrics.scroll_gesture_now
+                debug_fist_score = mode_metrics.debug_fist_score
+                debug_volume_score = mode_metrics.debug_volume_score
+                debug_grip_gap = mode_metrics.debug_grip_gap
+                debug_fist_folded = mode_metrics.debug_fist_folded
+                debug_fist_tightness = mode_metrics.debug_fist_tightness
+                debug_strong_fist = mode_metrics.debug_strong_fist
                 mp_control_ref = points[control_index]
 
                 # --------------------------------------------------------------
@@ -612,9 +544,10 @@ def _run_impl(cleanup):
                     now=now,
                 )
 
-                # MediaPipe ri-ancora i punti rigidi del palmo; LK li porta al frame corrente.
-                # Puntatore pinch-only. La mano aperta non muove mai il cursore.
-                pointer_allowed = pointer_mode_allowed(
+                pointer_result = update_pointer_state(
+                    pointer,
+                    control_hand=control_hand,
+                    now=now,
                     commands_enabled=commands_enabled,
                     spock_blocking=spock.blocking,
                     hand_count=len(hands),
@@ -629,81 +562,20 @@ def _run_impl(cleanup):
                     volume_candidate=(
                         volume_candidate_now or volume.candidate_at is not None
                     ),
+                    cursor=cursor,
+                    flow=flow,
+                    swipe=swipe,
+                    precision_snap_active=precision_snap_active,
+                    snap_anchor=snap_anchor,
+                    snap_started_at=snap_started_at,
+                    left_click_cb=left_click,
                 )
-                pointer_ratio = normalized_pinch_ratio(control_hand, 8)
-                pointer_fingers_valid = pointer_other_fingers_valid(control_hand)
-                pointer_pose_on = is_pointer_pinch_pose(control_hand, POINTER_PINCH_ON)
-
-                if pointer.pinch_held:
-                    # Se medio/anulare/mignolo si chiudono a pugno, annulla il
-                    # puntatore: non deve diventare ne' movimento ne' click.
-                    if not pointer_allowed or not pointer_fingers_valid:
-                        pointer.reset(preserve_last_click=True)
-                        cursor.sync(False)
-                    elif pointer_ratio > POINTER_PINCH_OFF:
-                        # Congela immediatamente il cursore appena il pinch e' chiaramente
-                        # aperto. La grace sotto serve solo a confermare il rilascio.
-                        pointer.release_braking = True
-                        pointer.move_active = False
-                        cursor.sync(False)
-                        flow.clear_motion()
-                        if pointer.release_at is None:
-                            pointer.release_at = now
-                        elif now - pointer.release_at >= POINTER_RELEASE_GRACE:
-                            pinch_duration = now - (pointer.pinch_started_at or now)
-                            quick_click = (
-                                pinch_duration <= POINTER_CLICK_MAX_SECONDS and
-                                pointer.flow_travel <= POINTER_CLICK_MAX_TRAVEL_PX
-                            )
-                            if quick_click:
-                                # Un click rapido non deve spostare il cursore nemmeno
-                                # se i primi frame del pinch hanno prodotto un po' di jitter.
-                                if pointer.cursor_origin is not None:
-                                    cursor.set_position(
-                                        pointer.cursor_origin[0], pointer.cursor_origin[1]
-                                    )
-                                    cursor.sync(False)
-                                is_double_pinch = (
-                                    pointer.last_click_at is not None and
-                                    now - pointer.last_click_at <= DOUBLE_PINCH_WINDOW
-                                )
-                                left_click()
-                                if is_double_pinch:
-                                    gesture_event = "DOPPIO PINCH: DOPPIO CLICK"
-                                    pointer.last_click_at = None
-                                else:
-                                    gesture_event = "PINCH RAPIDO: CLICK"
-                                    pointer.last_click_at = now
-                                gesture_event_until = now + GESTURE_EVENT_SHOW_SECONDS
-                            pointer.reset(preserve_last_click=True)
-                            precision_snap_active = False
-                            snap_anchor = None
-                            snap_started_at = None
-                            cursor.sync(False)
-                            flow.clear_motion()
-                    elif pointer_ratio > POINTER_RELEASE_BRAKE_RATIO:
-                        # Pre-rilascio: blocca il cursore prima ancora di raggiungere
-                        # la soglia OFF, cosi' l'apertura delle dita non trascina il mouse.
-                        pointer.release_braking = True
-                        pointer.move_active = False
-                        pointer.release_at = None
-                        cursor.sync(False)
-                        flow.clear_motion()
-                    else:
-                        pointer.release_braking = False
-                        pointer.release_at = None
-                elif pointer_allowed and pointer_pose_on:
-                    pointer.pinch_held = True
-                    pointer.move_active = False
-                    pointer.pinch_started_at = now
-                    pointer.release_at = None
-                    pointer.release_braking = False
-                    pointer.motion_accum[:] = 0.0
-                    pointer.flow_travel = 0.0
-                    pointer.cursor_origin = cursor.position()
-                    swipe.cancel_tracking()
-                    cursor.sync(False)
-                    flow.clear_motion()
+                if pointer_result.event is not None:
+                    gesture_event = pointer_result.event
+                    gesture_event_until = pointer_result.event_until
+                precision_snap_active = pointer_result.precision_snap_active
+                snap_anchor = pointer_result.snap_anchor
+                snap_started_at = pointer_result.snap_started_at
 
                 # Il pinch abilita il puntatore, ma la traslazione viene sempre
                 # misurata sulla parte rigida del palmo. Cosi' chiudere/aprire indice
@@ -979,7 +851,6 @@ def _run_impl(cleanup):
         snap_anchor = snap_update.anchor
         snap_started_at = snap_update.started_at
 
-        pinch_now = pointer.pinch_held
         gesture_mode = resolve_runtime_mode(
             commands_enabled=commands_enabled,
             spock_blocking=spock.blocking,
@@ -992,21 +863,20 @@ def _run_impl(cleanup):
             pointer_move=pointer.move_active,
             pointer_pinch=pointer.pinch_held,
         )
-        if latest_result is not None and latest_result.hand_landmarks:
-            for i, hand in enumerate(latest_result.hand_landmarks):
-                paused = fist_states[i] if i < len(fist_states) else False
-                draw_hand(frame, hand,
-                          pinch_active=(i == control_index and pinch_now),
-                          paused=paused,
-                          scrolling=(i == control_index and scroll.active),
-                          volume_control=(i == control_index and volume.active))
-
-        if radial.active and radial.center is not None:
-            draw_radial_menu(frame, radial.center, radial.selected)
-        if two_hand.active and two_hand.points is not None:
-            draw_two_hand_transform(
-                frame, two_hand.points[0], two_hand.points[1],
-            )
+        draw_runtime_overlays(
+            frame,
+            latest_result=latest_result,
+            fist_states=fist_states,
+            control_index=control_index,
+            pinch_active=pointer.pinch_held,
+            scroll_active=scroll.active,
+            volume_active=volume.active,
+            radial_active=radial.active,
+            radial_center=radial.center,
+            radial_selected=radial.selected,
+            two_hand_active=two_hand.active,
+            two_hand_points=two_hand.points,
+        )
 
         fps_frames += 1
         elapsed = now - fps_window_start

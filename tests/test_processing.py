@@ -1,4 +1,6 @@
 import unittest
+from collections import deque
+from types import SimpleNamespace
 
 from handtracking_state import SpockState
 
@@ -135,6 +137,59 @@ class ProcessingTests(unittest.TestCase):
         )
         self.assertFalse(reset.active)
         self.assertIsNone(reset.anchor)
+
+    def test_analyze_hand_frame_centralizes_control_selection_and_mode_candidates(self):
+        from handtracking_processing import analyze_hand_frame, update_hand_mode_metrics
+        from handtracking_state import FlowState, VolumeState
+
+        def make_hand():
+            return [SimpleNamespace(x=0.1, y=0.2, z=0.0) for _ in range(21)]
+
+        hands = [make_hand(), make_hand()]
+        class_hands = [make_hand(), make_hand()]
+        latest_result = SimpleNamespace(
+            handedness=[
+                [SimpleNamespace(category_name="Left")],
+                [SimpleNamespace(category_name="Right")],
+            ]
+        )
+        flow = FlowState(motion_scale=1.0)
+        volume = VolumeState()
+        votes = deque(maxlen=5)
+
+        result = analyze_hand_frame(
+            latest_result=latest_result,
+            hands=hands,
+            class_hands=class_hands,
+            previous_point=(0.1, 0.1),
+            previous_label="Left",
+            paused_by_fist=False,
+            fist_vote_history=votes,
+            volume_active=volume.active,
+            grip_fn=lambda hand: (0.2, 0.3, 1.0),
+            point_fn=lambda hand: (0.2, 0.3) if hand is hands[0] else (0.7, 0.8),
+            choose_fn=lambda points, labels, **kwargs: 1,
+            fist_fn=lambda hand: False,
+            strong_fist_fn=lambda hand: False,
+        )
+        mode = update_hand_mode_metrics(
+            result,
+            hands=hands,
+            volume=volume,
+            flow=flow,
+            fold_fn=lambda hand: (2, 1.1),
+            scroll_fn=lambda hand: False,
+            pixel_distance_fn=lambda *args: 90.0,
+            palm_scale_fn=lambda *args, **kwargs: 1.2,
+        )
+
+        self.assertEqual(result.control_index, 1)
+        self.assertEqual(result.selected_handedness, "Right")
+        self.assertFalse(result.paused_by_fist)
+        self.assertFalse(result.fist_pending)
+        self.assertFalse(mode.volume_candidate_now)
+        self.assertAlmostEqual(flow.motion_scale, 1.036)
+        self.assertEqual(mode.debug_fist_folded, 2)
 
 
 if __name__ == "__main__":

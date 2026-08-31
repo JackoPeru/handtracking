@@ -4,9 +4,12 @@ from dataclasses import dataclass
 import math
 
 from handtracking_config import *
+from handtracking_core import pointer_mode_allowed
 from handtracking_gestures import (
+    is_pointer_pinch_pose,
     is_radial_open_pose,
     normalized_pinch_ratio,
+    pointer_other_fingers_valid,
     radial_direction,
 )
 
@@ -16,6 +19,136 @@ class HandlerResult:
     event: str | None
     event_until: float | None
     input_block_until: float
+
+
+@dataclass(frozen=True)
+class PointerResult:
+    event: str | None
+    event_until: float | None
+    precision_snap_active: bool
+    snap_anchor: tuple[float, float] | None
+    snap_started_at: float | None
+
+
+def update_pointer_state(
+    pointer,
+    *,
+    control_hand,
+    now,
+    commands_enabled,
+    spock_blocking,
+    hand_count,
+    paused,
+    volume_active,
+    two_hand_active,
+    two_hand_candidate,
+    radial_active,
+    scroll_active,
+    swipe_tracking,
+    input_blocked,
+    volume_candidate,
+    cursor,
+    flow,
+    swipe,
+    precision_snap_active,
+    snap_anchor,
+    snap_started_at,
+    left_click_cb,
+    ratio_fn=normalized_pinch_ratio,
+    fingers_valid_fn=pointer_other_fingers_valid,
+    pose_fn=is_pointer_pinch_pose,
+    allowed_fn=pointer_mode_allowed,
+):
+    event = None
+    event_until = None
+    pointer_allowed = allowed_fn(
+        commands_enabled=commands_enabled,
+        spock_blocking=spock_blocking,
+        hand_count=hand_count,
+        paused=paused,
+        volume_active=volume_active,
+        two_hand_active=two_hand_active,
+        two_hand_candidate=two_hand_candidate,
+        radial_active=radial_active,
+        scroll_active=scroll_active,
+        swipe_tracking=swipe_tracking,
+        input_blocked=input_blocked,
+        volume_candidate=volume_candidate,
+    )
+    pointer_ratio = ratio_fn(control_hand, 8)
+    pointer_fingers_valid = fingers_valid_fn(control_hand)
+    pointer_pose_on = pose_fn(control_hand, POINTER_PINCH_ON)
+
+    if pointer.pinch_held:
+        if not pointer_allowed or not pointer_fingers_valid:
+            pointer.reset(preserve_last_click=True)
+            cursor.sync(False)
+        elif pointer_ratio > POINTER_PINCH_OFF:
+            pointer.release_braking = True
+            pointer.move_active = False
+            cursor.sync(False)
+            flow.clear_motion()
+            if pointer.release_at is None:
+                pointer.release_at = now
+            elif now - pointer.release_at >= POINTER_RELEASE_GRACE:
+                pinch_duration = now - (pointer.pinch_started_at or now)
+                quick_click = (
+                    pinch_duration <= POINTER_CLICK_MAX_SECONDS and
+                    pointer.flow_travel <= POINTER_CLICK_MAX_TRAVEL_PX
+                )
+                if quick_click:
+                    if pointer.cursor_origin is not None:
+                        cursor.set_position(
+                            pointer.cursor_origin[0], pointer.cursor_origin[1]
+                        )
+                        cursor.sync(False)
+                    is_double_pinch = (
+                        pointer.last_click_at is not None and
+                        now - pointer.last_click_at <= DOUBLE_PINCH_WINDOW
+                    )
+                    left_click_cb()
+                    if is_double_pinch:
+                        event = "DOPPIO PINCH: DOPPIO CLICK"
+                        pointer.last_click_at = None
+                    else:
+                        event = "PINCH RAPIDO: CLICK"
+                        pointer.last_click_at = now
+                    event_until = now + GESTURE_EVENT_SHOW_SECONDS
+                pointer.reset(preserve_last_click=True)
+                precision_snap_active = False
+                snap_anchor = None
+                snap_started_at = None
+                cursor.sync(False)
+                flow.clear_motion()
+        elif pointer_ratio > POINTER_RELEASE_BRAKE_RATIO:
+            pointer.release_braking = True
+            pointer.move_active = False
+            pointer.release_at = None
+            cursor.sync(False)
+            flow.clear_motion()
+        else:
+            pointer.release_braking = False
+            pointer.release_at = None
+    elif pointer_allowed and pointer_pose_on:
+        pointer.pinch_held = True
+        pointer.move_active = False
+        pointer.pinch_started_at = now
+        pointer.release_at = None
+        pointer.release_braking = False
+        pointer.motion_accum[:] = 0.0
+        pointer.flow_travel = 0.0
+        pointer.cursor_origin = cursor.position()
+        swipe.cancel_tracking()
+        cursor.sync(False)
+        flow.clear_motion()
+
+    return PointerResult(
+        event=event,
+        event_until=event_until,
+        precision_snap_active=precision_snap_active,
+        snap_anchor=snap_anchor,
+        snap_started_at=snap_started_at,
+    )
 
 
 def update_two_hand_state(
