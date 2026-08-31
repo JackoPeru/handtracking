@@ -155,4 +155,3 @@ def draw_runtime_hud(
         if fill_w > 0:
             cv2.rectangle(frame, (bar_x, bar_y),
                           (bar_x + fill_w, bar_y + bar_h), led_color, -1)
-

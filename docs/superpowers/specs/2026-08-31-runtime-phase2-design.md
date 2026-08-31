@@ -27,4 +27,3 @@ Ridurre `handtracking_runtime.py` e in particolare `_run_impl()` separando i blo
 - Suite completa verde, `py_compile`, `pip check`, `git diff --check`.
 - Smoke reale del modello MediaPipe e del worker.
 - Nessun import runtime morto o nuovo stato duplicato rilevato dall'audit AST.
-

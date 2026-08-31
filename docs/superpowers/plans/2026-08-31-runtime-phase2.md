@@ -79,4 +79,3 @@
 - [ ] Eseguire 64+ test, `py_compile`, `pip check`, `git diff --check`.
 - [ ] Eseguire smoke reale modello + worker MediaPipe.
 - [ ] Commit finale, integrare su `main`, riverificare e push senza force.
-
