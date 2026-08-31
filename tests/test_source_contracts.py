@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "handtracking_runtime.py").read_text(encoding="utf-8")
 WORKER_SOURCE = (ROOT / "handtracking_mediapipe.py").read_text(encoding="utf-8")
 CAMERA_SOURCE = (ROOT / "handtracking_camera.py").read_text(encoding="utf-8")
+SESSION_SOURCE = (ROOT / "handtracking_session.py").read_text(encoding="utf-8")
 HUD_SOURCE = (
     (ROOT / "handtracking_hud.py").read_text(encoding="utf-8")
     if (ROOT / "handtracking_hud.py").exists() else ""
@@ -59,6 +60,13 @@ class SourceContractTests(unittest.TestCase):
                 self.assertIn(import_text, SOURCE)
         self.assertNotIn("calcOpticalFlowPyrLK", SOURCE)
         self.assertNotIn("cv2.putText", SOURCE)
+
+    def test_runtime_delegates_resource_ownership_to_runtime_session(self):
+        self.assertIn("from handtracking_session import RuntimeSession", SOURCE)
+        self.assertNotIn("class RuntimeCleanup", SOURCE)
+        self.assertNotIn("MediaPipeWorker(", SOURCE)
+        self.assertNotIn("CursorController()", SOURCE)
+        self.assertNotIn("HandLandmarkerOptions(", SOURCE)
 
     def test_runtime_orchestrator_stays_below_phase_two_size_budget(self):
         tree = ast.parse(SOURCE)
@@ -134,9 +142,9 @@ class SourceContractTests(unittest.TestCase):
         self.assertNotIn("DWELL_RADIUS_PX", SOURCE)
         self.assertNotIn("dwell assistito", SOURCE)
 
-    def test_model_path_is_resolved_from_runtime_file(self):
-        self.assertIn("Path(__file__)", SOURCE)
-        self.assertNotIn('model_asset_path="hand_landmarker.task"', SOURCE)
+    def test_model_path_is_resolved_from_session_file(self):
+        self.assertIn("Path(__file__)", SESSION_SOURCE)
+        self.assertNotIn('model_asset_path="hand_landmarker.task"', SESSION_SOURCE)
 
     def test_runtime_has_stale_mediapipe_fail_safe(self):
         self.assertIn("MP_RESULT_STALE_SECONDS", SOURCE)

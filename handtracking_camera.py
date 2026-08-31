@@ -31,6 +31,7 @@ class CameraRuntime:
     codec: str
     target_fps: int
     cv2_module: object = cv2
+    _closed: bool = False
 
     @classmethod
     def open(cls, *, cv2_module=cv2):
@@ -98,3 +99,12 @@ class CameraRuntime:
     def show(self, frame):
         self.cv2_module.imshow("Hands", frame)
         return (self.cv2_module.waitKey(1) & 0xFF) != 27
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.capture.release()
+        finally:
+            self.cv2_module.destroyAllWindows()

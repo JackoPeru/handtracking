@@ -118,6 +118,23 @@ class FakeCursor:
 
 
 class RuntimeSmokeTests(unittest.TestCase):
+    @staticmethod
+    def _session_create_side_effect(runtime, worker, cursor):
+        real_create = runtime.RuntimeSession.create
+
+        def create(*, camera):
+            return real_create(
+                camera=camera,
+                worker_cls=lambda **kwargs: worker,
+                cursor_cls=lambda: cursor,
+                landmarker_factory=object(),
+                options=object(),
+                image_builder=lambda frame: frame,
+                get_volume=lambda: 0.5,
+            )
+
+        return create
+
     def test_no_hand_runtime_starts_and_cleans_up_without_real_devices(self):
         import handtracking_runtime as runtime
 
@@ -132,8 +149,11 @@ class RuntimeSmokeTests(unittest.TestCase):
             mock.patch.object(runtime.cv2, "imshow"),
             mock.patch.object(runtime.cv2, "waitKey", return_value=-1),
             mock.patch.object(runtime.cv2, "destroyAllWindows"),
-            mock.patch.object(runtime, "MediaPipeWorker", return_value=worker),
-            mock.patch.object(runtime, "CursorController", return_value=cursor),
+            mock.patch.object(
+                runtime.RuntimeSession,
+                "create",
+                side_effect=self._session_create_side_effect(runtime, worker, cursor),
+            ),
         ):
             runtime.run()
 
@@ -157,8 +177,11 @@ class RuntimeSmokeTests(unittest.TestCase):
             mock.patch.object(runtime.cv2, "setWindowProperty"),
             mock.patch.object(runtime.cv2, "resize", side_effect=RuntimeError("synthetic crash")),
             mock.patch.object(runtime.cv2, "destroyAllWindows", destroyed),
-            mock.patch.object(runtime, "MediaPipeWorker", return_value=worker),
-            mock.patch.object(runtime, "CursorController", return_value=cursor),
+            mock.patch.object(
+                runtime.RuntimeSession,
+                "create",
+                side_effect=self._session_create_side_effect(runtime, worker, cursor),
+            ),
         ):
             with self.assertRaisesRegex(RuntimeError, "synthetic crash"):
                 runtime.run()
@@ -195,8 +218,11 @@ class RuntimeSmokeTests(unittest.TestCase):
             mock.patch.object(runtime.cv2, "imshow"),
             mock.patch.object(runtime.cv2, "waitKey", return_value=-1),
             mock.patch.object(runtime.cv2, "destroyAllWindows"),
-            mock.patch.object(runtime, "MediaPipeWorker", return_value=worker),
-            mock.patch.object(runtime, "CursorController", return_value=cursor),
+            mock.patch.object(
+                runtime.RuntimeSession,
+                "create",
+                side_effect=self._session_create_side_effect(runtime, worker, cursor),
+            ),
         ):
             with self.assertRaisesRegex(RuntimeError, "MediaPipe worker stopped.*init failed"):
                 runtime.run()

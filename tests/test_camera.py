@@ -114,6 +114,28 @@ class CameraRuntimeTests(unittest.TestCase):
         self.assertFalse(runtime.show(np.zeros((10, 10, 3), dtype=np.uint8)))
         fake_cv2.imshow.assert_called_once()
 
+    def test_close_releases_capture_and_destroys_windows_once(self):
+        import handtracking_camera as camera
+
+        capture = FakeCapture(opened=True)
+        fake_cv2 = mock.Mock(wraps=camera.cv2)
+        fake_cv2.destroyAllWindows = mock.Mock()
+        runtime = camera.CameraRuntime(
+            capture=capture,
+            reported_fps=60.0,
+            reported_w=1280,
+            reported_h=720,
+            codec="MJPG",
+            target_fps=60,
+            cv2_module=fake_cv2,
+        )
+
+        runtime.close()
+        runtime.close()
+
+        self.assertTrue(capture.released)
+        fake_cv2.destroyAllWindows.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

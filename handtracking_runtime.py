@@ -2,11 +2,8 @@
 
 import math
 import time
-from collections import deque
-from pathlib import Path
 
 import cv2
-import mediapipe as mp
 
 from handtracking_camera import CameraRuntime
 from handtracking_core import (
@@ -28,7 +25,6 @@ from handtracking_handlers import (
     update_radial_state,
     update_two_hand_state,
 )
-from handtracking_mediapipe import MediaPipeWorker
 from handtracking_processing import (
     analyze_hand_frame,
     update_hand_mode_metrics,
@@ -51,18 +47,8 @@ from handtracking_gestures import (
     wrapped_angle_delta,
 )
 from handtracking_render import draw_runtime_overlays
-from handtracking_state import (
-    FlowState,
-    PointerState,
-    RadialState,
-    ScrollState,
-    SpockState,
-    SwipeState,
-    TwoHandState,
-    VolumeState,
-)
+from handtracking_session import RuntimeSession
 from handtracking_windows import (
-    CursorController,
     ctrl_wheel,
     execute_radial_action,
     execute_swipe,
@@ -76,135 +62,67 @@ from handtracking_windows import (
 # Limitarlo evita contesa CPU con MediaPipe/XNNPACK sul portatile 4C/8T.
 cv2.setNumThreads(1)
 
-BaseOptions = mp.tasks.BaseOptions
-HandLandmarker = mp.tasks.vision.HandLandmarker
-HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-VisionRunningMode = mp.tasks.vision.RunningMode
-
-class RuntimeCleanup:
-    """Own runtime resources so cleanup is guaranteed by the public wrapper."""
-
-    def __init__(self):
-        self.capture = None
-        self.mediapipe_worker = None
-        self.cursor = None
-
-    def close(self):
-        worker = self.mediapipe_worker
-        if worker is not None:
-            try:
-                worker.stop()
-            except Exception:
-                pass
-            try:
-                worker.join(timeout=2.0)
-            except Exception:
-                pass
-
-        if self.cursor is not None:
-            try:
-                self.cursor.close()
-            except Exception:
-                pass
-
-        if self.capture is not None:
-            try:
-                self.capture.release()
-            except Exception:
-                pass
-
-        try:
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
-
-MODEL_PATH = Path(__file__).with_name("hand_landmarker.task")
-
-options = HandLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path=str(MODEL_PATH)),
-    running_mode=VisionRunningMode.VIDEO,
-    num_hands=2,
-    min_hand_detection_confidence=0.5,
-    min_hand_presence_confidence=0.5,
-    min_tracking_confidence=0.5,
-)
-
-def _run_impl(cleanup):
-    camera = CameraRuntime.open()
-    cleanup.capture = camera.capture
+def _run_impl(session):
+    camera = session.camera
     reported_fps = camera.reported_fps
     reported_w = camera.reported_w
     reported_h = camera.reported_h
     camera_codec = camera.codec
     camera_target_fps = camera.target_fps
 
-    start_time = time.perf_counter()
+    start_time = session.start_time
+    mp_worker = session.worker
+    cursor = session.cursor
+    screen_w, screen_h = session.screen_w, session.screen_h
 
-    def build_mediapipe_image(bgr):
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        return mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    flow = session.flow
+    pointer = session.pointer
+    scroll = session.scroll
+    volume = session.volume
+    swipe = session.swipe
+    radial = session.radial
+    two_hand = session.two_hand
+    spock = session.spock
 
-    mp_worker = MediaPipeWorker(
-        factory=HandLandmarker,
-        options=options,
-        image_builder=build_mediapipe_image,
-    )
-    cleanup.mediapipe_worker = mp_worker
-    mp_worker.start()
-    cursor = CursorController()
-    cleanup.cursor = cursor
-    screen_w, screen_h = cursor.screen_size()
-    cursor.sync(False)
-    cursor.start()
-
-    flow = FlowState()
-    pointer = PointerState()
-    scroll = ScrollState()
-    volume = VolumeState(level=get_system_volume())
-    swipe = SwipeState()
-    radial = RadialState()
-    two_hand = TwoHandState()
-    spock = SpockState()
-
-    latest_result = None
-    latest_result_seq = -1
-    control_index = 0
-    control_handedness = None
-    mp_control_ref = None
-    fist_states = []
-    paused_by_fist = False
-    fist_vote_history = deque(maxlen=FIST_VOTE_WINDOW)
-    debug_fist_score = 0.0
-    debug_volume_score = 0.0
-    debug_grip_gap = 0.0
-    debug_fist_folded = 0
-    debug_fist_tightness = 2.0
-    debug_strong_fist = False
+    latest_result = session.latest_result
+    latest_result_seq = session.latest_result_seq
+    control_index = session.control_index
+    control_handedness = session.control_handedness
+    mp_control_ref = session.mp_control_ref
+    fist_states = session.fist_states
+    paused_by_fist = session.paused_by_fist
+    fist_vote_history = session.fist_vote_history
+    debug_fist_score = session.debug_fist_score
+    debug_volume_score = session.debug_volume_score
+    debug_grip_gap = session.debug_grip_gap
+    debug_fist_folded = session.debug_fist_folded
+    debug_fist_tightness = session.debug_fist_tightness
+    debug_strong_fist = session.debug_strong_fist
 
     # Stato del Gesture Engine centrale.
-    gesture_mode = "MOUSE"
-    gesture_event = ""
-    gesture_event_until = 0.0
-    gesture_input_block_until = 0.0
+    gesture_mode = session.gesture_mode
+    gesture_event = session.gesture_event
+    gesture_event_until = session.gesture_event_until
+    gesture_input_block_until = session.gesture_input_block_until
 
     # Gate globale dei comandi. Il tracking resta sempre acceso.
-    commands_enabled = False
+    commands_enabled = session.commands_enabled
 
     # Precision snap: stabilizza il cursore quando la mano rallenta.
-    snap_anchor = None
-    snap_started_at = None
-    precision_snap_active = False
-    last_hand_seen = time.perf_counter()
-    fps_window_start = time.perf_counter()
-    fps_frames = 0
-    actual_fps = 0.0
-    mp_fps_window_start = time.perf_counter()
-    mp_fps_last_seq = 0
-    actual_mp_fps = 0.0
-    mp_infer_ms_ema = 0.0
-    mp_worker_ms_ema = 0.0
-    mp_cycle_ms_ema = 0.0
-    mp_queue_ms_ema = 0.0
+    snap_anchor = session.snap_anchor
+    snap_started_at = session.snap_started_at
+    precision_snap_active = session.precision_snap_active
+    last_hand_seen = session.last_hand_seen
+    fps_window_start = session.fps_window_start
+    fps_frames = session.fps_frames
+    actual_fps = session.actual_fps
+    mp_fps_window_start = session.mp_fps_window_start
+    mp_fps_last_seq = session.mp_fps_last_seq
+    actual_mp_fps = session.actual_mp_fps
+    mp_infer_ms_ema = session.mp_infer_ms_ema
+    mp_worker_ms_ema = session.mp_worker_ms_ema
+    mp_cycle_ms_ema = session.mp_cycle_ms_ema
+    mp_queue_ms_ema = session.mp_queue_ms_ema
     while True:
         prepared = camera.read_prepared()
         if prepared is None:
@@ -907,11 +825,16 @@ def _run_impl(cleanup):
 
 
 def run():
-    cleanup = RuntimeCleanup()
+    camera = CameraRuntime.open()
+    session = None
     try:
-        return _run_impl(cleanup)
+        session = RuntimeSession.create(camera=camera)
+        return _run_impl(session)
     finally:
-        cleanup.close()
+        if session is not None:
+            session.close()
+        else:
+            camera.close()
 
 
 if __name__ == "__main__":
