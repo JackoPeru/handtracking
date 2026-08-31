@@ -10,7 +10,6 @@ import mediapipe as mp
 import numpy as np
 
 from handtracking_core import (
-    advance_confirmed_hold,
     choose_camera_target_fps,
     choose_control_index,
     fist_evidence_from_hands,
@@ -18,7 +17,6 @@ from handtracking_core import (
     normalized_points_pixel_distance,
     palm_motion_scale,
     pointer_mode_allowed,
-    spock_release_gate_active,
     tracking_result_is_stale,
 )
 from handtracking_engine import resolve_runtime_mode
@@ -31,6 +29,7 @@ from handtracking_flow import (
 )
 from handtracking_hud import draw_runtime_hud
 from handtracking_mediapipe import MediaPipeWorker
+from handtracking_processing import update_ema_metrics, update_spock_state
 from handtracking_config import *
 from handtracking_gestures import (
     clamp,
@@ -343,20 +342,11 @@ def _run_impl(cleanup):
             new_mp = True
 
         if new_mp:
-            if mp_infer_ms_ema <= 0.0:
-                mp_infer_ms_ema = mp_infer_ms
-                mp_worker_ms_ema = mp_worker_ms
-                mp_cycle_ms_ema = mp_cycle_ms
-                mp_queue_ms_ema = mp_queue_ms
-            else:
-                mp_infer_ms_ema = mp_infer_ms_ema * 0.85 + mp_infer_ms * 0.15
-                mp_worker_ms_ema = mp_worker_ms_ema * 0.85 + mp_worker_ms * 0.15
-                if mp_cycle_ms > 0.0:
-                    if mp_cycle_ms_ema <= 0.0:
-                        mp_cycle_ms_ema = mp_cycle_ms
-                    else:
-                        mp_cycle_ms_ema = mp_cycle_ms_ema * 0.85 + mp_cycle_ms * 0.15
-                mp_queue_ms_ema = mp_queue_ms_ema * 0.85 + mp_queue_ms * 0.15
+            (mp_infer_ms_ema, mp_worker_ms_ema,
+             mp_cycle_ms_ema, mp_queue_ms_ema) = update_ema_metrics(
+                (mp_infer_ms_ema, mp_worker_ms_ema, mp_cycle_ms_ema, mp_queue_ms_ema),
+                (mp_infer_ms, mp_worker_ms, mp_cycle_ms, mp_queue_ms),
+            )
             if latest_result.hand_landmarks:
                 hands = latest_result.hand_landmarks
                 world_hands = getattr(latest_result, "hand_world_landmarks", None)
@@ -365,42 +355,8 @@ def _run_impl(cleanup):
                 else:
                     class_hands = world_hands
 
-                # Spock e' il gate globale: il movimento assoluto della mano NON conta.
-                # Usiamo solo la geometria relativa delle dita e una memoria temporale
-                # robusta: tremolio, motion blur o 2-4 frame sbagliati non interrompono
-                # l'aggancio ne' azzerano il secondo di mantenimento.
                 spock_scores_now = [spock_pose_score(hand) for hand in hands]
-                spock.debug_score = max(spock_scores_now, default=0.0)
                 upright_now = any(spock_all_fingers_up(hand) for hand in hands)
-                if upright_now:
-                    spock.upright_invalid_frames = 0
-                    spock.score_history.append(spock.debug_score)
-                else:
-                    spock.upright_invalid_frames += 1
-                    # Un frame storto puo' essere jitter. Una posa realmente non verticale
-                    # per piu' frame annulla invece subito la candidatura Spock.
-                    if spock.upright_invalid_frames >= SPOCK_UP_INVALID_FRAMES:
-                        spock.score_history.clear()
-                        if not spock.latched:
-                            spock.candidate_at = None
-                            spock.last_seen = None
-                            spock.blocking = False
-                            spock.progress = 0.0
-                            spock.confirmed_seconds = 0.0
-
-                ranked_spock = sorted(spock.score_history, reverse=True)
-                keep_index = min(SPOCK_SCORE_KEEP_BEST - 1, len(ranked_spock) - 1)
-                history_evidence = ranked_spock[keep_index] if ranked_spock else 0.0
-                spock.debug_stable_score = max(spock.debug_score, history_evidence)
-                if spock.upright_invalid_frames >= SPOCK_UP_INVALID_FRAMES:
-                    spock.debug_stable_score = 0.0
-                spock_threshold = (
-                    SPOCK_SCORE_HOLD
-                    if (spock.candidate_at is not None or spock.latched or spock.blocking)
-                    else SPOCK_SCORE_ON
-                )
-                spock_now = spock.debug_stable_score >= spock_threshold
-                spock_toggled = False
                 spock_sample_seconds = min(
                     SPOCK_SAMPLE_MAX_SECONDS,
                     max(
@@ -409,95 +365,28 @@ def _run_impl(cleanup):
                         1.0 / 120.0,
                     ),
                 )
-                if spock.release_required:
-                    spock.blocking = True
-                    spock.progress = 1.0
-                    if spock_now:
-                        spock.release_at = None
-                    else:
-                        if spock.release_at is None:
-                            spock.release_at = now
-                        release_elapsed = now - spock.release_at
-                        if not spock_release_gate_active(
-                                required=True,
-                                detected=False,
-                                release_elapsed=release_elapsed,
-                                release_seconds=SPOCK_RELEASE_SECONDS):
-                            spock.release_required = False
-                            spock.blocking = False
-                            spock.release_at = None
-                            spock.progress = 0.0
-                            spock.confirmed_seconds = 0.0
-                            gesture_input_block_until = max(
-                                gesture_input_block_until,
-                                now + SPOCK_POST_RELEASE_BLOCK,
-                            )
-                elif spock_now:
-                    spock.release_at = None
-                    spock.last_seen = now
-                    spock.blocking = True
-                    if spock.latched:
-                        spock.progress = 1.0
-                    else:
-                        if spock.candidate_at is None:
-                            spock.candidate_at = now
-                            spock.confirmed_seconds = 0.0
-                        spock.confirmed_seconds = advance_confirmed_hold(
-                            spock.confirmed_seconds,
-                            upright_now,
-                            spock_sample_seconds,
-                            SPOCK_HOLD_SECONDS,
-                        )
-                        spock.progress = clamp(
-                            spock.confirmed_seconds / SPOCK_HOLD_SECONDS, 0.0, 1.0
-                        )
-                        if spock.progress >= 1.0:
-                            commands_enabled = not commands_enabled
-                            spock.latched = True
-                            spock.candidate_at = None
-                            spock.progress = 1.0
-                            spock_toggled = True
-                            gesture_event = (
-                                "CONTROLLI ATTIVI" if commands_enabled else "CONTROLLI BLOCCATI"
-                            )
-                            gesture_event_until = now + 1.20
-                else:
-                    if spock.latched:
-                        spock.blocking = True
-                        if spock.release_at is None:
-                            spock.release_at = now
-                        elif now - spock.release_at >= SPOCK_RELEASE_SECONDS:
-                            spock.latched = False
-                            spock.blocking = False
-                            spock.release_at = None
-                            spock.progress = 0.0
-                            spock.confirmed_seconds = 0.0
-                            gesture_input_block_until = max(
-                                gesture_input_block_until,
-                                now + SPOCK_POST_RELEASE_BLOCK,
-                            )
-                            mp_control_ref = None
-                            control_handedness = None
-                            flow.points = None
-                            flow.active = False
-                            cursor.sync(False)
-                    elif (spock.candidate_at is not None and spock.last_seen is not None and
-                          now - spock.last_seen <= SPOCK_MISS_GRACE):
-                        spock.blocking = True
-                        spock.progress = clamp(
-                            spock.confirmed_seconds / SPOCK_HOLD_SECONDS, 0.0, 1.0
-                        )
-                    else:
-                        spock.candidate_at = None
-                        spock.last_seen = None
-                        spock.release_at = None
-                        spock.blocking = False
-                        spock.progress = 0.0
-                        spock.confirmed_seconds = 0.0
-                        spock.score_history.clear()
-                        spock.debug_stable_score = 0.0
+                spock_update = update_spock_state(
+                    spock,
+                    raw_score=max(spock_scores_now, default=0.0),
+                    upright_now=upright_now,
+                    now=now,
+                    sample_seconds=spock_sample_seconds,
+                    commands_enabled=commands_enabled,
+                    input_block_until=gesture_input_block_until,
+                )
+                commands_enabled = spock_update.commands_enabled
+                gesture_input_block_until = spock_update.input_block_until
+                if spock_update.event is not None:
+                    gesture_event = spock_update.event
+                    gesture_event_until = spock_update.event_until
+                if spock_update.released:
+                    mp_control_ref = None
+                    control_handedness = None
+                    flow.points = None
+                    flow.active = False
+                    cursor.sync(False)
 
-                if spock_toggled:
+                if spock_update.toggled:
                     paused_by_fist = False
                     fist_vote_history.clear()
                     volume.reset()
