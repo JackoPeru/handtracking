@@ -100,6 +100,13 @@ class SwipeState:
     debug_gap: float = 9.0
     debug_extended: int = 0
 
+    def cancel_tracking(self):
+        self.tracking = False
+        self.pose_last_seen = None
+        self.flow_started_at = None
+        self.flow_accum_x = 0.0
+        self.flow_accum_y = 0.0
+
     def reset(self, *, preserve_cooldown=False):
         cooldown = self.cooldown_until if preserve_cooldown else 0.0
         self.tracking = False
@@ -208,15 +215,18 @@ class FlowState:
     motion_scale: float = 1.0
     last_success: float = 0.0
 
+    def clear_motion(self):
+        self.virtual[:] = 0.0
+        self.filtered[:] = 0.0
+        self.prev_filtered[:] = 0.0
+        self.time = None
+
     def reset(self, *, preserve_prev_gray=False, preserve_motion_scale=False):
         prev_gray = self.prev_gray if preserve_prev_gray else None
         motion_scale = self.motion_scale if preserve_motion_scale else 1.0
         self.prev_gray = prev_gray
         self.points = None
-        self.virtual[:] = 0.0
-        self.filtered[:] = 0.0
-        self.prev_filtered[:] = 0.0
-        self.time = None
+        self.clear_motion()
         self.active = False
         self.motion_scale = motion_scale
         self.last_success = 0.0

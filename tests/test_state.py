@@ -87,6 +87,47 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertTrue(np.array_equal(state.virtual, np.zeros(2)))
         self.assertTrue(np.array_equal(state.filtered, np.zeros(2)))
 
+    def test_flow_clear_motion_preserves_tracking_anchors(self):
+        from handtracking_state import FlowState
+
+        state = FlowState()
+        state.prev_gray = object()
+        state.points = object()
+        state.active = True
+        state.motion_scale = 1.2
+        state.last_success = 7.0
+        state.virtual[:] = (2.0, 3.0)
+        state.filtered[:] = (4.0, 5.0)
+        state.prev_filtered[:] = (1.0, 2.0)
+        state.time = 9.0
+        state.clear_motion()
+
+        self.assertTrue(state.active)
+        self.assertIsNotNone(state.prev_gray)
+        self.assertIsNotNone(state.points)
+        self.assertEqual(state.motion_scale, 1.2)
+        self.assertEqual(state.last_success, 7.0)
+        self.assertIsNone(state.time)
+        self.assertTrue(np.array_equal(state.virtual, np.zeros(2)))
+        self.assertTrue(np.array_equal(state.filtered, np.zeros(2)))
+        self.assertTrue(np.array_equal(state.prev_filtered, np.zeros(2)))
+
+    def test_swipe_cancel_tracking_preserves_cooldown_and_pose_history(self):
+        from handtracking_state import SwipeState
+
+        state = SwipeState(tracking=True, cooldown_until=12.0, flow_started_at=3.0,
+                           flow_accum_x=5.0, flow_accum_y=2.0)
+        state.pose_history.extend((0.3, 0.8))
+        state.pose_last_seen = 4.0
+        state.cancel_tracking()
+
+        self.assertFalse(state.tracking)
+        self.assertEqual(state.cooldown_until, 12.0)
+        self.assertEqual(list(state.pose_history), [0.3, 0.8])
+        self.assertIsNone(state.pose_last_seen)
+        self.assertIsNone(state.flow_started_at)
+        self.assertEqual((state.flow_accum_x, state.flow_accum_y), (0.0, 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()
