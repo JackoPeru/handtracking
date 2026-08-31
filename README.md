@@ -14,13 +14,17 @@ Struttura principale:
 - `handtracking_config.py`: costanti e soglie senza side effect.
 - `handtracking_gestures.py`: geometria e classificatori gesture puri.
 - `handtracking_engine.py`: priorita' e risoluzione della modalita' gesture.
+- `handtracking_flow.py`: optical flow LK, filtro del movimento e dispatch camera-rate di swipe/scroll/puntatore.
+- `handtracking_handlers.py`: transizioni focalizzate di pointer, two-hand e menu radiale.
+- `handtracking_processing.py`: processing semipuro dei risultati MediaPipe, Spock, metriche mano, swipe e precision snap.
 - `handtracking_state.py`: state object e reset centralizzati.
 - `handtracking_windows.py`: input Windows, volume e cursore asincrono.
 - `handtracking_render.py`: rendering OpenCV e overlay.
+- `handtracking_hud.py`: stato testuale, diagnostica, LED e barra Spock.
 - `handtracking_core.py`: logica pura e testabile di priorita', timing e tracking della mano.
 - `handtracking_mediapipe.py`: worker di inferenza che possiede il ciclo di vita del `HandLandmarker`.
 - `tests/`: regressioni automatiche che non richiedono la webcam.
-- `snapshots/`: vecchie versioni manuali conservate solo come riferimento.
+- `snapshots/`: eventuali vecchie versioni locali sono ignorate da Git e non fanno parte del repository pubblico.
 
 Test logici senza webcam: `python -m unittest discover -s tests -v`.
 

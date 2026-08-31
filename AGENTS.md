@@ -7,4 +7,6 @@
 - Any loss of fresh MediaPipe results must disable cursor/gesture output before optical flow can continue on its own.
 - Keep gesture mode priority in `handtracking_engine.py`; do not duplicate it in the runtime or classifiers.
 - Keep resettable gesture state in `handtracking_state.py`; prefer tested reset helpers over repeated assignment blocks.
-- Verify with `python -m unittest discover -s tests -v` and `python -m py_compile main.py test.py handtracking_core.py handtracking_config.py handtracking_engine.py handtracking_gestures.py handtracking_mediapipe.py handtracking_render.py handtracking_runtime.py handtracking_state.py handtracking_windows.py`.
+- Keep LK measurement/camera-rate motion dispatch in `handtracking_flow.py`, focused gesture transitions in `handtracking_handlers.py`, semi-pure MediaPipe processing in `handtracking_processing.py`, and diagnostics in `handtracking_hud.py`.
+- `handtracking_runtime.py` must remain an orchestrator; do not move extracted optical-flow, HUD, pointer, radial, two-hand, Spock or hand-analysis logic back into `_run_impl()`.
+- Verify with `python -m unittest discover -s tests -v` and compile every root Python module before merging.

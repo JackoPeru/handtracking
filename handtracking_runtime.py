@@ -7,16 +7,10 @@ from pathlib import Path
 
 import cv2
 import mediapipe as mp
-import numpy as np
 
 from handtracking_core import (
     choose_camera_target_fps,
-    choose_control_index,
-    fist_evidence_from_hands,
     normalize_flow_delta,
-    normalized_points_pixel_distance,
-    palm_motion_scale,
-    pointer_mode_allowed,
     tracking_result_is_stale,
 )
 from handtracking_engine import resolve_runtime_mode
@@ -46,19 +40,10 @@ from handtracking_config import *
 from handtracking_gestures import (
     clamp,
     control_point,
-    fist_fold_metrics,
-    grip_class_scores,
-    is_fist,
     is_open_hand,
-    is_pointer_pinch_pose,
-    is_radial_open_pose,
-    is_scroll_gesture,
-    is_strong_fist,
     is_volume_release_pose,
     normalized_pinch_ratio,
     palm_roll_angle,
-    pointer_other_fingers_valid,
-    radial_direction,
     spock_all_fingers_up,
     spock_pose_score,
     two_hand_geometry,
@@ -204,7 +189,6 @@ def _run_impl(cleanup):
     control_handedness = None
     mp_control_ref = None
     fist_states = []
-    scroll_states = []
     paused_by_fist = False
     fist_vote_history = deque(maxlen=FIST_VOTE_WINDOW)
     debug_fist_score = 0.0
@@ -283,7 +267,6 @@ def _run_impl(cleanup):
             flow.clear_motion()
             latest_result = None
             fist_states = []
-            scroll_states = []
             debug_fist_score = 0.0
             debug_volume_score = 0.0
             debug_grip_gap = 0.0
@@ -455,7 +438,6 @@ def _run_impl(cleanup):
                 volume_gesture_now = mode_metrics.volume_gesture_now
                 volume_candidate_now = mode_metrics.volume_candidate_now
                 fist_states = mode_metrics.fist_states
-                scroll_states = mode_metrics.scroll_states
                 scroll_gesture_now = mode_metrics.scroll_gesture_now
                 debug_fist_score = mode_metrics.debug_fist_score
                 debug_volume_score = mode_metrics.debug_volume_score
@@ -795,7 +777,6 @@ def _run_impl(cleanup):
                     spock.debug_stable_score = 0.0
 
                 fist_states = []
-                scroll_states = []
 
                 # Il vecchio grace di 280 ms e' utile per non perdere lo stato delle
                 # gesture, ma e' troppo lungo per un cursore: se la mano sparisce,

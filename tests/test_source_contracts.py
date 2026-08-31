@@ -1,3 +1,4 @@
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -45,6 +46,26 @@ class SourceContractTests(unittest.TestCase):
         ):
             with self.subTest(function_name=function_name):
                 self.assertNotIn(f"def {function_name}(", SOURCE)
+
+    def test_runtime_uses_phase_two_processing_modules(self):
+        for import_text in (
+            "from handtracking_flow import",
+            "from handtracking_handlers import",
+            "from handtracking_hud import",
+            "from handtracking_processing import",
+        ):
+            with self.subTest(import_text=import_text):
+                self.assertIn(import_text, SOURCE)
+        self.assertNotIn("calcOpticalFlowPyrLK", SOURCE)
+        self.assertNotIn("cv2.putText", SOURCE)
+
+    def test_runtime_orchestrator_stays_below_phase_two_size_budget(self):
+        tree = ast.parse(SOURCE)
+        run_impl = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_run_impl"
+        )
+        self.assertLess(run_impl.end_lineno - run_impl.lineno + 1, 800)
 
     def test_media_pipe_queue_does_not_copy_fresh_frames(self):
         self.assertNotIn(

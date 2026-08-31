@@ -64,7 +64,6 @@ class HandModeMetrics:
     volume_gesture_now: bool
     volume_candidate_now: bool
     fist_states: list
-    scroll_states: list
     scroll_gesture_now: bool
     debug_fist_score: float
     debug_volume_score: float
@@ -247,7 +246,6 @@ def update_hand_mode_metrics(
         volume_gesture_now=volume_gesture_now,
         volume_candidate_now=volume_candidate_now,
         fist_states=fist_states,
-        scroll_states=scroll_states,
         scroll_gesture_now=scroll_gesture_now,
         debug_fist_score=debug_fist_score,
         debug_volume_score=debug_volume_score,
