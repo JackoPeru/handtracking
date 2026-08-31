@@ -30,9 +30,9 @@ from handtracking_processing import (
     update_hand_mode_metrics,
     update_ema_metrics,
     update_precision_snap,
-    update_spock_state,
     update_swipe_pose,
 )
+from handtracking_spock import update_spock_state
 from handtracking_scroll import update_scroll_state
 from handtracking_config import *
 from handtracking_gestures import (
