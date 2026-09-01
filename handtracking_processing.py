@@ -11,6 +11,7 @@ from handtracking_core import (
     palm_motion_scale,
 )
 from handtracking_gestures import (
+    HandFeatures,
     control_point,
     fist_fold_metrics,
     grip_class_scores,
@@ -21,14 +22,14 @@ from handtracking_gestures import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SnapUpdate:
     active: bool
     anchor: tuple[float, float] | None
     started_at: float | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HandFrameAnalysis:
     control_index: int
     control_distance: float
@@ -46,7 +47,7 @@ class HandFrameAnalysis:
     fist_pending: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HandModeMetrics:
     volume_gesture_now: bool
     volume_candidate_now: bool
@@ -93,6 +94,11 @@ def analyze_hand_frame(
     fist_fn=is_fist,
     strong_fist_fn=is_strong_fist,
 ):
+    hands = [hand if isinstance(hand, HandFeatures) else HandFeatures(hand) for hand in hands]
+    class_hands = [
+        hand if isinstance(hand, HandFeatures) else HandFeatures(hand)
+        for hand in class_hands
+    ]
     class_metrics = [grip_fn(hand) for hand in class_hands]
     norm_metrics = [grip_fn(hand) for hand in hands]
     fist_scores = [m[0] for m in class_metrics]

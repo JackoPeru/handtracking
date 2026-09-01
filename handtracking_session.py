@@ -9,7 +9,10 @@ import cv2
 import mediapipe as mp
 
 from handtracking_config import FIST_VOTE_WINDOW
+from handtracking_config import HUD_REFRESH_HZ
+from handtracking_display import OverlayLayer
 from handtracking_mediapipe import MediaPipeWorker
+from handtracking_perf import MediaPipeSubmitScheduler, PerfProfiler
 from handtracking_state import (
     FlowState,
     PointerState,
@@ -67,7 +70,7 @@ def _close_resources(worker, cursor, camera):
             pass
 
 
-@dataclass
+@dataclass(slots=True)
 class RuntimeSession:
     camera: object
     worker: object
@@ -129,6 +132,12 @@ class RuntimeSession:
     mp_overwrites: int = 0
     mp_error_count: int = 0
     mp_last_error: str = ""
+    camera_target_fps: int = 0
+    perf: PerfProfiler = field(default_factory=PerfProfiler)
+    mp_scheduler: MediaPipeSubmitScheduler = field(default_factory=MediaPipeSubmitScheduler)
+    hud_layer: OverlayLayer = field(
+        default_factory=lambda: OverlayLayer(HUD_REFRESH_HZ, height=370)
+    )
     _closed: bool = False
 
     @classmethod
@@ -169,6 +178,7 @@ class RuntimeSession:
                 last_hand_seen=now,
                 fps_window_start=now,
                 mp_fps_window_start=now,
+                camera_target_fps=int(getattr(camera, "target_fps", 0)),
             )
         except Exception:
             _close_resources(worker, cursor, camera)

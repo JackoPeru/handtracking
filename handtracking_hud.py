@@ -71,6 +71,12 @@ def draw_runtime_hud(
     swipe_debug_extended,
     mp_error_count,
     mp_last_error,
+    perf_camera_ms=0.0,
+    perf_preprocess_ms=0.0,
+    perf_flow_ms=0.0,
+    perf_mp_process_ms=0.0,
+    perf_render_ms=0.0,
+    perf_loop_ms=0.0,
 ):
     status = build_status_text(
         gesture_mode,
@@ -124,11 +130,17 @@ def draw_runtime_hud(
             (30, 286), cv2.FONT_HERSHEY_SIMPLEX,
             0.72, (0, 255, 255), 2, cv2.LINE_AA,
         )
+    cv2.putText(
+        frame,
+        f"PERF cam {perf_camera_ms:.2f} | prep {perf_preprocess_ms:.2f} | flow {perf_flow_ms:.2f} | mp {perf_mp_process_ms:.2f} | render {perf_render_ms:.2f} | loop {perf_loop_ms:.2f} ms",
+        (30, 318), cv2.FONT_HERSHEY_SIMPLEX,
+        0.50, (180, 220, 255), 1, cv2.LINE_AA,
+    )
     if mp_error_count:
         cv2.putText(
             frame,
             f"MP ERR {mp_error_count}: {mp_last_error}",
-            (30, 318), cv2.FONT_HERSHEY_SIMPLEX,
+            (30, 348), cv2.FONT_HERSHEY_SIMPLEX,
             0.50, (0, 80, 255), 2, cv2.LINE_AA,
         )
 

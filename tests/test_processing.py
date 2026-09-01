@@ -76,6 +76,7 @@ class ProcessingTests(unittest.TestCase):
         self.assertIsNone(reset.anchor)
 
     def test_analyze_hand_frame_centralizes_control_selection_and_mode_candidates(self):
+        from handtracking_gestures import HandFeatures
         from handtracking_processing import analyze_hand_frame, update_hand_mode_metrics
         from handtracking_state import FlowState, VolumeState
 
@@ -104,7 +105,9 @@ class ProcessingTests(unittest.TestCase):
             fist_vote_history=votes,
             volume_active=volume.active,
             grip_fn=lambda hand: (0.2, 0.3, 1.0),
-            point_fn=lambda hand: (0.2, 0.3) if hand is hands[0] else (0.7, 0.8),
+            point_fn=lambda hand: (
+                (0.2, 0.3) if hand.landmarks is hands[0] else (0.7, 0.8)
+            ),
             choose_fn=lambda points, labels, **kwargs: 1,
             fist_fn=lambda hand: False,
             strong_fist_fn=lambda hand: False,
@@ -121,6 +124,8 @@ class ProcessingTests(unittest.TestCase):
         )
 
         self.assertEqual(result.control_index, 1)
+        self.assertIsInstance(result.control_hand, HandFeatures)
+        self.assertIs(result.control_hand.landmarks, hands[1])
         self.assertEqual(result.selected_handedness, "Right")
         self.assertFalse(result.paused_by_fist)
         self.assertFalse(result.fist_pending)

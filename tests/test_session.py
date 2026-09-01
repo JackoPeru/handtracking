@@ -57,6 +57,7 @@ class RuntimeSessionTests(unittest.TestCase):
         FakeCursor.instances.clear()
 
     def test_create_starts_runtime_resources_and_initializes_state(self):
+        from handtracking_perf import PerfProfiler
         from handtracking_session import RuntimeSession
 
         camera = FakeCamera()
@@ -83,6 +84,7 @@ class RuntimeSessionTests(unittest.TestCase):
         self.assertFalse(session.commands_enabled)
         self.assertEqual(session.gesture_mode, "MOUSE")
         self.assertEqual(session.latest_result_seq, -1)
+        self.assertIsInstance(session.perf, PerfProfiler)
 
         session.close()
 

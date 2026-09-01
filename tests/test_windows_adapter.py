@@ -9,8 +9,10 @@ class FakeUser32:
         self.moves = []
         self.mouse_events = []
         self.key_events = []
+        self.cursor_reads = 0
 
     def GetCursorPos(self, point_ptr):
+        self.cursor_reads += 1
         point = point_ptr._obj
         point.x = self.x
         point.y = self.y
@@ -78,6 +80,24 @@ class WindowsAdapterTests(unittest.TestCase):
 
         self.assertEqual((user32.x, user32.y), (321, 123))
         self.assertEqual(user32.moves[-1], (321, 123))
+
+    def test_cursor_sync_only_reads_os_position_when_activating(self):
+        from handtracking_windows import CursorController
+
+        user32 = FakeUser32()
+        cursor = CursorController(user32=user32)
+
+        cursor.sync(False)
+        cursor.sync(False)
+        self.assertEqual(user32.cursor_reads, 0)
+
+        cursor.sync(True)
+        self.assertEqual(user32.cursor_reads, 1)
+        cursor.sync(True)
+        self.assertEqual(user32.cursor_reads, 1)
+
+        cursor.sync(False)
+        self.assertEqual(user32.cursor_reads, 1)
 
 
 if __name__ == "__main__":

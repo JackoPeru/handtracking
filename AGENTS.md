@@ -10,4 +10,10 @@
 - Keep LK measurement/camera-rate motion dispatch in `handtracking_flow.py`, focused gesture transitions in `handtracking_handlers.py`, semi-pure MediaPipe processing in `handtracking_processing.py`, and diagnostics in `handtracking_hud.py`.
 - Keep webcam ownership/preprocessing in `handtracking_camera.py`, runtime resource ownership in `handtracking_session.py`, tracking-loss fail-safes in `handtracking_tracking.py`, MediaPipe packet orchestration in `handtracking_frame.py`, gesture-mode coordination in `handtracking_modes.py`, and volume/scroll/Spock state machines in their dedicated modules.
 - `handtracking_runtime.py` must remain an orchestrator; do not move extracted optical-flow, HUD, pointer, radial, two-hand, Spock or hand-analysis logic back into `_run_impl()`.
+- Keep `RuntimeSession` as the single scalar source of truth. Do not mirror session state into a second set of loop-local scalar variables.
+- Gate LK before calling OpenCV and keep camera detection preprocessing conditional on submit/flow/new-packet demand.
+- Keep MediaPipe worker wakeup event-driven; do not reintroduce millisecond polling loops.
+- Preserve the lazy `HandFeatures` cache when adding classifiers. Reuse cached joint angles instead of recomputing identical `acos` geometry in the same MediaPipe result.
+- HUD caching is allowed because it benchmarks faster. Do not cache the full-frame skeleton overlay unless a local benchmark proves it is faster than direct drawing.
+- Run `python -m benchmarks.hotpath_benchmark` for hot-path performance changes and report before/after numbers; do not accept a performance refactor based only on code appearance.
 - Verify with `python -m unittest discover -s tests -v` and compile every root Python module before merging.

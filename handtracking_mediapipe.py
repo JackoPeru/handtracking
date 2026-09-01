@@ -16,6 +16,7 @@ class MediaPipeWorker(threading.Thread):
         self._image_builder = image_builder
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._pending_event = threading.Event()
         self._pending = None
         self._latest = None
         self._seq = 0
@@ -32,6 +33,7 @@ class MediaPipeWorker(threading.Thread):
             if self._pending is not None:
                 self._overwrites += 1
             self._pending = (frame, gray, timestamp_ms, enqueued_at)
+            self._pending_event.set()
 
     def snapshot(self):
         with self._lock:
@@ -74,6 +76,7 @@ class MediaPipeWorker(threading.Thread):
 
     def stop(self):
         self._stop_event.set()
+        self._pending_event.set()
 
     def run(self):
         last_ts = -1
@@ -88,11 +91,14 @@ class MediaPipeWorker(threading.Thread):
 
         with landmarker_context as landmarker:
             while not self._stop_event.is_set():
+                self._pending_event.wait()
+                if self._stop_event.is_set():
+                    break
                 with self._lock:
                     packet = self._pending
                     self._pending = None
+                    self._pending_event.clear()
                 if packet is None:
-                    self._stop_event.wait(0.001)
                     continue
 
                 frame, gray, timestamp_ms, enqueued_at = packet

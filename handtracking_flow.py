@@ -11,7 +11,7 @@ from handtracking_core import normalize_flow_delta
 from handtracking_gestures import clamp
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LKMotion:
     next_points: np.ndarray
     dx: float
@@ -19,7 +19,7 @@ class LKMotion:
     magnitude: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FlowDispatchResult:
     gesture_event: str | None
     gesture_event_until: float | None
@@ -130,6 +130,44 @@ def measure_optical_flow(prev_gray, gray, points, motion_scale):
     )
 
 
+def commit_flow_measurement(flow, gray, motion, *, now):
+    """Advance LK anchors without ever pairing stale points with a newer frame."""
+    flow.prev_gray = gray
+    if motion is None:
+        flow.points = None
+        flow.active = False
+        return
+    flow.points = motion.next_points
+    flow.active = True
+    flow.last_success = now
+
+
+def should_measure_optical_flow(*, now, mp_result_stale, paused_by_fist,
+                                commands_enabled, spock_blocking,
+                                gesture_input_block_until, pointer, volume,
+                                two_hand, radial, scroll, swipe, flow):
+    if flow.prev_gray is None or flow.points is None:
+        return False
+    if (mp_result_stale or paused_by_fist or not commands_enabled or
+            spock_blocking or now < gesture_input_block_until):
+        return False
+    if pointer.pinch_held and not pointer.release_braking:
+        return True
+    if scroll.active or swipe.tracking:
+        return True
+    if (
+        swipe.pose_last_seen is not None and
+        now - swipe.pose_last_seen <= SWIPE_MISS_GRACE and
+        not pointer.pinch_held and
+        not volume.active and volume.candidate_at is None and
+        not two_hand.active and two_hand.candidate_at is None and
+        not radial.active and not scroll.active and
+        now >= swipe.cooldown_until
+    ):
+        return True
+    return False
+
+
 def dispatch_flow_motion(*, motion_dx, motion_dy, motion_mag, now,
                          mp_result_stale, paused_by_fist, commands_enabled,
                          spock_blocking, gesture_input_block_until,
@@ -229,10 +267,11 @@ def dispatch_flow_motion(*, motion_dx, motion_dy, motion_mag, now,
                 mouse_wheel_cb(wheel_delta)
                 scroll.residual -= wheel_delta
     elif pointer.pinch_held and not pointer.release_braking:
-        pointer.motion_accum += np.array([motion_dx, motion_dy], dtype=np.float64)
+        pointer.motion_accum[0] += motion_dx
+        pointer.motion_accum[1] += motion_dy
         pointer.flow_travel = max(
             pointer.flow_travel,
-            float(np.linalg.norm(pointer.motion_accum)),
+            math.hypot(float(pointer.motion_accum[0]), float(pointer.motion_accum[1])),
         )
         if (not pointer.move_active and
                 pointer.flow_travel >= POINTER_MOVE_TRIGGER_PX):
@@ -241,7 +280,8 @@ def dispatch_flow_motion(*, motion_dx, motion_dy, motion_mag, now,
             flow.clear_motion()
 
         if pointer.move_active:
-            flow.virtual += np.array([motion_dx, motion_dy], dtype=np.float64)
+            flow.virtual[0] += motion_dx
+            flow.virtual[1] += motion_dy
             if flow.time is None:
                 flow.filtered[:] = flow.virtual
                 flow.prev_filtered[:] = flow.filtered
@@ -252,11 +292,14 @@ def dispatch_flow_motion(*, motion_dx, motion_dy, motion_mag, now,
                 mix = clamp(speed / FLOW_FAST_SPEED, 0.0, 1.0)
                 tau = FLOW_TAU_SLOW + (FLOW_TAU_FAST - FLOW_TAU_SLOW) * mix
                 alpha = 1.0 - math.exp(-dt / tau)
-                flow.filtered += (flow.virtual - flow.filtered) * alpha
-                out = flow.filtered - flow.prev_filtered
-                flow.prev_filtered[:] = flow.filtered
+                flow.filtered[0] += (flow.virtual[0] - flow.filtered[0]) * alpha
+                flow.filtered[1] += (flow.virtual[1] - flow.filtered[1]) * alpha
+                out_x = float(flow.filtered[0] - flow.prev_filtered[0])
+                out_y = float(flow.filtered[1] - flow.prev_filtered[1])
+                flow.prev_filtered[0] = flow.filtered[0]
+                flow.prev_filtered[1] = flow.filtered[1]
                 flow.time = now
-                out_mag = float(np.linalg.norm(out))
+                out_mag = math.hypot(out_x, out_y)
                 if out_mag >= FLOW_SOFT_DEADZONE_PX:
                     if out_mag < FLOW_DEADZONE_PX:
                         ramp = clamp(
@@ -264,11 +307,13 @@ def dispatch_flow_motion(*, motion_dx, motion_dy, motion_mag, now,
                             (FLOW_DEADZONE_PX - FLOW_SOFT_DEADZONE_PX),
                             0.0, 1.0,
                         )
-                        out = out * (ramp * ramp)
+                        ramp *= ramp
+                        out_x *= ramp
+                        out_y *= ramp
                     dynamic_gain = cursor_gain_for_speed(speed)
-                    dx = (out[0] / DETECTION_W * screen_w * MOVE_GAIN *
+                    dx = (out_x / DETECTION_W * screen_w * MOVE_GAIN *
                           MOVEMENT_MULTIPLIER * dynamic_gain)
-                    dy = (out[1] / DETECTION_H * screen_h * MOVE_GAIN *
+                    dy = (out_y / DETECTION_H * screen_h * MOVE_GAIN *
                           MOVEMENT_MULTIPLIER * dynamic_gain)
                     screen_step = math.hypot(float(dx), float(dy))
                     if precision_snap_active:

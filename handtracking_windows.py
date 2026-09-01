@@ -208,11 +208,19 @@ class CursorController:
         self.user32.SetCursorPos(int(round(x)), int(round(y)))
 
     def sync(self, active):
+        active = bool(active)
+        with self._lock:
+            if self._active == active:
+                return
+            if not active:
+                self._active = False
+                return
+
         x, y = self.position()
         with self._lock:
             self._target[0] = float(x)
             self._target[1] = float(y)
-            self._active = bool(active)
+            self._active = True
 
     def add_delta(self, dx, dy, *, screen_size=None):
         width, height = screen_size or self.screen_size()

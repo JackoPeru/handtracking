@@ -7,7 +7,7 @@ from handtracking_core import advance_confirmed_hold, spock_release_gate_active
 from handtracking_gestures import clamp
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SpockUpdate:
     commands_enabled: bool
     toggled: bool

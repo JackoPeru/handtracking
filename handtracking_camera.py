@@ -15,14 +15,14 @@ from handtracking_config import (
 from handtracking_core import choose_camera_target_fps
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PreparedFrame:
     frame: object
     detect_frame: object
     gray: object
 
 
-@dataclass
+@dataclass(slots=True)
 class CameraRuntime:
     capture: object
     reported_fps: float
@@ -81,10 +81,19 @@ class CameraRuntime:
         )
 
     def read_prepared(self):
+        frame = self.read_frame()
+        if frame is None:
+            return None
+        detect_frame, gray = self.prepare_detection(frame)
+        return PreparedFrame(frame, detect_frame, gray)
+
+    def read_frame(self):
         ok, frame = self.capture.read()
         if not ok:
             return None
-        frame = self.cv2_module.flip(frame, 1)
+        return self.cv2_module.flip(frame, 1)
+
+    def prepare_detection(self, frame):
         detect_frame = self.cv2_module.resize(
             frame,
             (DETECTION_W, DETECTION_H),
@@ -94,7 +103,7 @@ class CameraRuntime:
             detect_frame,
             self.cv2_module.COLOR_BGR2GRAY,
         )
-        return PreparedFrame(frame, detect_frame, gray)
+        return detect_frame, gray
 
     def show(self, frame):
         self.cv2_module.imshow("Hands", frame)

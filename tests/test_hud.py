@@ -52,6 +52,12 @@ class HudTests(unittest.TestCase):
             swipe_debug_extended=4,
             mp_error_count=0,
             mp_last_error="",
+            perf_camera_ms=0.2,
+            perf_preprocess_ms=0.15,
+            perf_flow_ms=0.8,
+            perf_mp_process_ms=0.4,
+            perf_render_ms=0.3,
+            perf_loop_ms=2.1,
         )
         before = metrics.copy()
 

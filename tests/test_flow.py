@@ -29,6 +29,68 @@ class FakeCursor:
 
 
 class FlowModuleTests(unittest.TestCase):
+    def test_failed_lk_clears_points_instead_of_pairing_stale_points_with_new_frame(self):
+        from handtracking_flow import commit_flow_measurement
+
+        old_gray = object()
+        new_gray = object()
+        old_points = object()
+        flow = FlowState(prev_gray=old_gray, points=old_points, active=True)
+
+        commit_flow_measurement(flow, new_gray, None, now=10.0)
+
+        self.assertIs(flow.prev_gray, new_gray)
+        self.assertIsNone(flow.points)
+        self.assertFalse(flow.active)
+
+    def test_flow_gate_skips_idle_and_blocked_states(self):
+        from handtracking_flow import should_measure_optical_flow
+        from handtracking_state import (
+            FlowState, PointerState, RadialState, ScrollState, SwipeState,
+            TwoHandState, VolumeState,
+        )
+
+        flow = FlowState()
+        flow.prev_gray = object()
+        flow.points = object()
+        pointer = PointerState()
+        volume = VolumeState()
+        two_hand = TwoHandState()
+        radial = RadialState()
+        scroll = ScrollState()
+        swipe = SwipeState()
+
+        base = dict(
+            now=10.0,
+            mp_result_stale=False,
+            paused_by_fist=False,
+            commands_enabled=True,
+            spock_blocking=False,
+            gesture_input_block_until=0.0,
+            pointer=pointer,
+            volume=volume,
+            two_hand=two_hand,
+            radial=radial,
+            scroll=scroll,
+            swipe=swipe,
+            flow=flow,
+        )
+        self.assertFalse(should_measure_optical_flow(**base))
+        pointer.pinch_held = True
+        self.assertTrue(should_measure_optical_flow(**base))
+        pointer.pinch_held = False
+        scroll.active = True
+        self.assertTrue(should_measure_optical_flow(**base))
+        scroll.active = False
+        swipe.tracking = True
+        self.assertTrue(should_measure_optical_flow(**base))
+        swipe.tracking = False
+        swipe.pose_last_seen = 9.9
+        self.assertTrue(should_measure_optical_flow(**base))
+
+        blocked = dict(base, gesture_input_block_until=11.0)
+        self.assertFalse(should_measure_optical_flow(**blocked))
+
     def test_summarize_lk_tracks_rejects_large_forward_backward_error(self):
         from handtracking_flow import summarize_lk_tracks
 

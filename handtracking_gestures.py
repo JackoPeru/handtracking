@@ -5,6 +5,145 @@ import math
 from handtracking_config import *
 
 
+_UNSET = object()
+
+
+class HandFeatures:
+    """Lazy per-hand geometry cache that remains landmark-sequence compatible."""
+
+    __slots__ = (
+        "landmarks", "_control_point", "_gap_ratio", "_grip_scores",
+        "_fold_metrics", "_point_pose", "_fist", "_strong_fist",
+        "_scroll_pose", "_open_hand", "_volume_release", "_pinch_index",
+        "_pointer_valid", "_swipe_metrics", "_spock_all_up", "_spock_score",
+        "_angle_cache",
+    )
+
+    def __init__(self, landmarks):
+        self.landmarks = landmarks.landmarks if isinstance(landmarks, HandFeatures) else landmarks
+        self._control_point = _UNSET
+        self._gap_ratio = _UNSET
+        self._grip_scores = _UNSET
+        self._fold_metrics = _UNSET
+        self._point_pose = _UNSET
+        self._fist = _UNSET
+        self._strong_fist = _UNSET
+        self._scroll_pose = _UNSET
+        self._open_hand = _UNSET
+        self._volume_release = _UNSET
+        self._pinch_index = _UNSET
+        self._pointer_valid = _UNSET
+        self._swipe_metrics = _UNSET
+        self._spock_all_up = _UNSET
+        self._spock_score = _UNSET
+        self._angle_cache = {}
+
+    def __len__(self):
+        return len(self.landmarks)
+
+    def __getitem__(self, index):
+        return self.landmarks[index]
+
+    def __iter__(self):
+        return iter(self.landmarks)
+
+    def control_point(self):
+        if self._control_point is _UNSET:
+            self._control_point = control_point(self.landmarks)
+        return self._control_point
+
+    def gap_ratio(self):
+        if self._gap_ratio is _UNSET:
+            self._gap_ratio = grip_gap_ratio(self.landmarks)
+        return self._gap_ratio
+
+    def grip_scores(self):
+        if self._grip_scores is _UNSET:
+            self._grip_scores = _compute_grip_class_scores(self)
+            self._gap_ratio = self._grip_scores[2]
+        return self._grip_scores
+
+    def fold_metrics(self):
+        if self._fold_metrics is _UNSET:
+            self._fold_metrics = fist_fold_metrics(self.landmarks)
+        return self._fold_metrics
+
+    def point_pose(self):
+        if self._point_pose is _UNSET:
+            self._point_pose = _compute_point_pose(self)
+        return self._point_pose
+
+    def fist(self):
+        if self._fist is _UNSET:
+            self._fist = False if self.point_pose() else self.fold_metrics()[0] >= 3
+        return self._fist
+
+    def strong_fist(self):
+        if self._strong_fist is _UNSET:
+            if self.point_pose():
+                self._strong_fist = False
+            else:
+                folded = self.fold_metrics()[0]
+                gap = self.gap_ratio()
+                self._strong_fist = (
+                    (folded >= 4 and gap <= FIST_VOLUME_OVERRIDE_GAP_MAX) or
+                    (folded >= 3 and gap <= FIST_VOLUME_OVERRIDE_GAP_3F)
+                )
+        return self._strong_fist
+
+    def scroll_pose(self):
+        if self._scroll_pose is _UNSET:
+            self._scroll_pose = _compute_scroll_gesture(self)
+        return self._scroll_pose
+
+    def open_hand(self):
+        if self._open_hand is _UNSET:
+            self._open_hand = _compute_open_hand(self)
+        return self._open_hand
+
+    def volume_release(self):
+        if self._volume_release is _UNSET:
+            self._volume_release = _compute_volume_release_pose(self)
+        return self._volume_release
+
+    def pinch_ratio(self, finger_tip=8):
+        if finger_tip != 8:
+            return normalized_pinch_ratio(self.landmarks, finger_tip)
+        if self._pinch_index is _UNSET:
+            self._pinch_index = normalized_pinch_ratio(self.landmarks, 8)
+        return self._pinch_index
+
+    def pointer_valid(self):
+        if self._pointer_valid is _UNSET:
+            self._pointer_valid = _compute_pointer_other_fingers_valid(self)
+        return self._pointer_valid
+
+    def swipe_metrics(self):
+        if self._swipe_metrics is _UNSET:
+            self._swipe_metrics = _compute_swipe_pose_metrics(self)
+        return self._swipe_metrics
+
+    def spock_all_up(self):
+        if self._spock_all_up is _UNSET:
+            self._spock_all_up = spock_all_fingers_up(self.landmarks)
+        return self._spock_all_up
+
+    def spock_score(self):
+        if self._spock_score is _UNSET:
+            self._spock_score = spock_pose_score(self.landmarks)
+        return self._spock_score
+
+    def angle(self, a, b, c):
+        key = (a, b, c)
+        value = self._angle_cache.get(key, _UNSET)
+        if value is _UNSET:
+            value = joint_angle3(
+                self.landmarks[a], self.landmarks[b], self.landmarks[c]
+            )
+            self._angle_cache[key] = value
+        return value
+
+
 def clamp(value, low, high):
     return max(low, min(high, value))
 
@@ -32,7 +171,15 @@ def joint_angle3(a, b, c):
     return math.degrees(math.acos(cosine))
 
 
+def joint_angle_ids(hand, a, b, c):
+    if isinstance(hand, HandFeatures):
+        return hand.angle(a, b, c)
+    return joint_angle3(hand[a], hand[b], hand[c])
+
+
 def control_point(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.control_point()
     mid_x = (hand[9].x + hand[13].x) * 0.5
     mid_y = (hand[9].y + hand[13].y) * 0.5
     return mid_x * 0.82 + hand[0].x * 0.18, mid_y * 0.82 + hand[0].y * 0.18
@@ -47,6 +194,8 @@ def mouse_point(hand):
 
 
 def grip_gap_ratio(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.gap_ratio()
     palm_width = max(dist3(hand[5], hand[17]), 0.001)
     cx = (hand[0].x + hand[5].x + hand[9].x + hand[13].x + hand[17].x) / 5.0
     cy = (hand[0].y + hand[5].y + hand[9].y + hand[13].y + hand[17].y) / 5.0
@@ -61,14 +210,20 @@ def grip_gap_ratio(hand):
 
 
 def finger_curl_score(hand, mcp, pip, dip, tip):
-    pip_angle = joint_angle3(hand[mcp], hand[pip], hand[dip])
-    dip_angle = joint_angle3(hand[pip], hand[dip], hand[tip])
+    pip_angle = joint_angle_ids(hand, mcp, pip, dip)
+    dip_angle = joint_angle_ids(hand, pip, dip, tip)
     pip_score = clamp((172.0 - pip_angle) / 58.0, 0.0, 1.0)
     dip_score = clamp((176.0 - dip_angle) / 58.0, 0.0, 1.0)
     return max(pip_score, dip_score)
 
 
 def grip_class_scores(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.grip_scores()
+    return _compute_grip_class_scores(hand)
+
+
+def _compute_grip_class_scores(hand):
     gap = grip_gap_ratio(hand)
     curls = [
         finger_curl_score(hand, 5, 6, 7, 8),
@@ -77,8 +232,8 @@ def grip_class_scores(hand):
         finger_curl_score(hand, 17, 18, 19, 20),
     ]
     thumb = max(
-        clamp((170.0 - joint_angle3(hand[1], hand[2], hand[3])) / 55.0, 0.0, 1.0),
-        clamp((176.0 - joint_angle3(hand[2], hand[3], hand[4])) / 55.0, 0.0, 1.0),
+        clamp((170.0 - joint_angle_ids(hand, 1, 2, 3)) / 55.0, 0.0, 1.0),
+        clamp((176.0 - joint_angle_ids(hand, 2, 3, 4)) / 55.0, 0.0, 1.0),
     )
     finger_mean = sum(curls) / 4.0
     fist_gap = clamp(
@@ -102,6 +257,8 @@ def grip_class_scores(hand):
 
 
 def fist_fold_metrics(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.fold_metrics()
     wrist = hand[0]
     ratios = []
     folded = 0
@@ -116,6 +273,8 @@ def fist_fold_metrics(hand):
 
 
 def is_fist(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.fist()
     if is_point_pose(hand):
         return False
     folded, _ = fist_fold_metrics(hand)
@@ -123,6 +282,8 @@ def is_fist(hand):
 
 
 def is_strong_fist(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.strong_fist()
     if is_point_pose(hand):
         return False
     folded, _ = fist_fold_metrics(hand)
@@ -134,6 +295,12 @@ def is_strong_fist(hand):
 
 
 def is_scroll_gesture(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.scroll_pose()
+    return _compute_scroll_gesture(hand)
+
+
+def _compute_scroll_gesture(hand):
     wrist = hand[0]
     hand_scale = max(dist(wrist, hand[9]), 0.001)
     index_extended = dist(hand[8], wrist) > dist(hand[6], wrist) * 1.12
@@ -145,20 +312,32 @@ def is_scroll_gesture(hand):
 
 
 def is_open_hand(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.open_hand()
+    return _compute_open_hand(hand)
+
+
+def _compute_open_hand(hand):
     for mcp, pip, dip, tip in (
         (5, 6, 7, 8),
         (9, 10, 11, 12),
         (13, 14, 15, 16),
         (17, 18, 19, 20),
     ):
-        pip_angle = joint_angle3(hand[mcp], hand[pip], hand[dip])
-        dip_angle = joint_angle3(hand[pip], hand[dip], hand[tip])
+        pip_angle = joint_angle_ids(hand, mcp, pip, dip)
+        dip_angle = joint_angle_ids(hand, pip, dip, tip)
         if pip_angle < VOLUME_OPEN_MIN_DEG or dip_angle < VOLUME_OPEN_MIN_DEG:
             return False
     return True
 
 
 def is_volume_release_pose(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.volume_release()
+    return _compute_volume_release_pose(hand)
+
+
+def _compute_volume_release_pose(hand):
     extended = 0
     for mcp, pip, dip, tip in (
         (5, 6, 7, 8),
@@ -166,8 +345,8 @@ def is_volume_release_pose(hand):
         (13, 14, 15, 16),
         (17, 18, 19, 20),
     ):
-        pip_angle = joint_angle3(hand[mcp], hand[pip], hand[dip])
-        dip_angle = joint_angle3(hand[pip], hand[dip], hand[tip])
+        pip_angle = joint_angle_ids(hand, mcp, pip, dip)
+        dip_angle = joint_angle_ids(hand, pip, dip, tip)
         if pip_angle >= VOLUME_RELEASE_MIN_DEG and dip_angle >= VOLUME_RELEASE_MIN_DEG:
             extended += 1
     return extended >= VOLUME_RELEASE_MIN_FINGERS
@@ -182,11 +361,19 @@ def wrapped_angle_delta(current, previous):
 
 
 def normalized_pinch_ratio(hand, finger_tip=8):
+    if isinstance(hand, HandFeatures):
+        return hand.pinch_ratio(finger_tip)
     scale = max(dist(hand[0], hand[9]), 0.001)
     return dist(hand[4], hand[finger_tip]) / scale
 
 
 def pointer_other_fingers_valid(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.pointer_valid()
+    return _compute_pointer_other_fingers_valid(hand)
+
+
+def _compute_pointer_other_fingers_valid(hand):
     curls = [
         finger_curl_score(hand, 9, 10, 11, 12),
         finger_curl_score(hand, 13, 14, 15, 16),
@@ -207,11 +394,17 @@ def is_pointer_pinch_pose(hand, pinch_limit):
 
 
 def is_point_pose(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.point_pose()
+    return _compute_point_pose(hand)
+
+
+def _compute_point_pose(hand):
     wrist = hand[0]
     index_extended = (
         dist(hand[8], wrist) > dist(hand[6], wrist) * 1.14 and
-        joint_angle3(hand[5], hand[6], hand[7]) >= 158.0 and
-        joint_angle3(hand[6], hand[7], hand[8]) >= 154.0
+        joint_angle_ids(hand, 5, 6, 7) >= 158.0 and
+        joint_angle_ids(hand, 6, 7, 8) >= 154.0
     )
     folded = 0
     for pip_id, tip_id in ((10, 12), (14, 16), (18, 20)):
@@ -221,6 +414,12 @@ def is_point_pose(hand):
 
 
 def swipe_pose_metrics(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.swipe_metrics()
+    return _compute_swipe_pose_metrics(hand)
+
+
+def _compute_swipe_pose_metrics(hand):
     wrist = hand[0]
     palm_width = max(dist(hand[5], hand[17]), 0.001)
     extension_scores = []
@@ -238,8 +437,8 @@ def swipe_pose_metrics(hand):
             (extension_ratio - SWIPE_EXTENSION_SCORE_LOW) /
             (SWIPE_EXTENSION_SCORE_HIGH - SWIPE_EXTENSION_SCORE_LOW), 0.0, 1.0,
         ))
-        pip_angle = joint_angle3(hand[mcp], hand[pip], hand[dip])
-        dip_angle = joint_angle3(hand[pip], hand[dip], hand[tip])
+        pip_angle = joint_angle_ids(hand, mcp, pip, dip)
+        dip_angle = joint_angle_ids(hand, pip, dip, tip)
         straight_angle = min(pip_angle, dip_angle)
         straight_scores.append(clamp(
             (straight_angle - SWIPE_STRAIGHT_SCORE_LOW) /
@@ -278,6 +477,8 @@ def is_radial_open_pose(hand):
 
 
 def spock_all_fingers_up(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.spock_all_up()
     palm_height = max(dist(hand[0], hand[9]), 0.001)
     wrist = hand[0]
     for mcp, pip, tip in ((5, 6, 8), (9, 10, 12), (13, 14, 16), (17, 18, 20)):
@@ -292,6 +493,8 @@ def spock_all_fingers_up(hand):
 
 
 def spock_pose_score(hand):
+    if isinstance(hand, HandFeatures):
+        return hand.spock_score()
     palm_width = max(dist(hand[5], hand[17]), 0.001)
     palm_height = max(dist(hand[0], hand[9]), 0.001)
     up_scores = []

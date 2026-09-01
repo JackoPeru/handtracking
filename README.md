@@ -29,11 +29,29 @@ Struttura principale:
 - `handtracking_windows.py`: input Windows, volume e cursore asincrono.
 - `handtracking_render.py`: rendering OpenCV e overlay.
 - `handtracking_hud.py`: stato testuale, diagnostica, LED e barra Spock.
+- `handtracking_display.py`: layer HUD cached a frequenza ridotta senza rallentare tracking/input.
+- `handtracking_perf.py`: profiler EMA e scheduler adattivo dei submit MediaPipe.
 - `handtracking_core.py`: logica pura e testabile di priorita', timing e tracking della mano.
 - `handtracking_mediapipe.py`: worker di inferenza che possiede il ciclo di vita del `HandLandmarker`.
+- `benchmarks/hotpath_benchmark.py`: micro-benchmark riproducibile di geometria, LK, preprocessing e rendering.
 - `tests/`: regressioni automatiche che non richiedono la webcam.
 - `snapshots/`: eventuali vecchie versioni locali sono ignorate da Git e non fanno parte del repository pubblico.
 
 Test logici senza webcam: `python -m unittest discover -s tests -v`.
+
+Benchmark hot path: `python -m benchmarks.hotpath_benchmark`.
+
+Ottimizzazioni runtime principali:
+
+- optical flow LK eseguito solo quando pointer/scroll/swipe possono consumarlo;
+- preprocessing 640x360/gray eseguito solo per submit MediaPipe, LK o nuovo packet da riallineare;
+- `HandFeatures` memoizza geometria e angoli condivisi per ogni mano/risultato MediaPipe;
+- `RuntimeSession` e' la singola source of truth dello stato scalare del loop;
+- HUD diagnostico aggiornato a 12 Hz su un layer limitato alla fascia superiore; tracking e input non vengono throttled;
+- skeleton/overlay resta diretto: il benchmark locale ha mostrato che una cache full-frame con `copyTo` e' piu' lenta;
+- worker MediaPipe event-driven, senza polling a 1 ms, con scheduler submit adattivo e latest-frame-wins;
+- state/result object hot slotted e aggiornamenti 2D flow in-place per ridurre allocazioni.
+
+Sul benchmark sintetico usato durante la fase performance, la geometria rappresentativa e' passata da circa 65 us a 51 us per mano (-20% circa); HUD da circa 0,80 ms/frame diretto a 0,39 ms/frame medio cached. I valori dipendono dall'hardware: usare sempre il benchmark locale prima di modificare frequenze o strategie di caching.
 
 La modalita' a due mani implementa lo zoom. La vecchia indicazione di rotazione e' stata rimossa perche' non esiste una scorciatoia di rotazione universale affidabile tra le applicazioni Windows.

@@ -14,14 +14,14 @@ from handtracking_gestures import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HandlerResult:
     event: str | None
     event_until: float | None
     input_block_until: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PointerResult:
     event: str | None
     event_until: float | None

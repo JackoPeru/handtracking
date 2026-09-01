@@ -14,7 +14,7 @@ from handtracking_config import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class PointerState:
     pinch_held: bool = False
     move_active: bool = False
@@ -41,7 +41,7 @@ class PointerState:
         self.last_click_at = last_click
 
 
-@dataclass
+@dataclass(slots=True)
 class ScrollState:
     active: bool = False
     candidate_at: float | None = None
@@ -55,7 +55,7 @@ class ScrollState:
         self.residual = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class VolumeState:
     active: bool = False
     candidate_at: float | None = None
@@ -84,7 +84,7 @@ class VolumeState:
         self.vote_history.clear()
 
 
-@dataclass
+@dataclass(slots=True)
 class SwipeState:
     tracking: bool = False
     cooldown_until: float = 0.0
@@ -122,7 +122,7 @@ class SwipeState:
         self.debug_extended = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class RadialState:
     candidate_at: float | None = None
     anchor: tuple[float, float] | None = None
@@ -148,7 +148,7 @@ class RadialState:
         self.pinch_candidate_at = None
 
 
-@dataclass
+@dataclass(slots=True)
 class TwoHandState:
     candidate_at: float | None = None
     active: bool = False
@@ -170,7 +170,7 @@ class TwoHandState:
         self.points = None
 
 
-@dataclass
+@dataclass(slots=True)
 class SpockState:
     candidate_at: float | None = None
     last_seen: float | None = None
@@ -203,7 +203,7 @@ class SpockState:
         self.upright_invalid_frames = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class FlowState:
     prev_gray: object | None = None
     points: object | None = None

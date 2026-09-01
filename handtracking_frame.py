@@ -23,6 +23,7 @@ from handtracking_spock import (
 )
 from handtracking_tracking import handle_missing_hands
 from handtracking_gestures import (
+    HandFeatures,
     spock_all_fingers_up,
     spock_pose_score,
 )
@@ -35,7 +36,7 @@ from handtracking_windows import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrameProcessResult:
     processed: bool
     skip_frame: bool = False
@@ -74,12 +75,12 @@ def process_mediapipe_packet(
         _process_missing_hands(session, now=now)
         return FrameProcessResult(True)
 
-    hands = session.latest_result.hand_landmarks
+    hands = [HandFeatures(hand) for hand in session.latest_result.hand_landmarks]
     world_hands = getattr(session.latest_result, "hand_world_landmarks", None)
     class_hands = (
         hands
         if not world_hands or len(world_hands) != len(hands)
-        else world_hands
+        else [HandFeatures(hand) for hand in world_hands]
     )
 
     _process_spock(

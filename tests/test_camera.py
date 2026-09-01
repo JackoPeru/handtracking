@@ -95,6 +95,35 @@ class CameraRuntimeTests(unittest.TestCase):
         self.assertEqual(prepared.gray.shape, (camera.DETECTION_H, camera.DETECTION_W))
         self.assertGreater(prepared.frame[:, -10:].mean(), 200.0)
 
+    def test_read_frame_defers_resize_and_grayscale_until_detection_is_needed(self):
+        import handtracking_camera as camera
+
+        source = np.zeros((720, 1280, 3), dtype=np.uint8)
+        capture = FakeCapture(opened=True, frame=source)
+        fake_cv2 = mock.Mock(wraps=camera.cv2)
+        fake_cv2.INTER_AREA = camera.cv2.INTER_AREA
+        fake_cv2.COLOR_BGR2GRAY = camera.cv2.COLOR_BGR2GRAY
+        runtime = camera.CameraRuntime(
+            capture=capture,
+            reported_fps=60.0,
+            reported_w=1280,
+            reported_h=720,
+            codec="MJPG",
+            target_fps=60,
+            cv2_module=fake_cv2,
+        )
+
+        frame = runtime.read_frame()
+        self.assertIsNotNone(frame)
+        fake_cv2.resize.assert_not_called()
+        fake_cv2.cvtColor.assert_not_called()
+
+        detect_frame, gray = runtime.prepare_detection(frame)
+        self.assertEqual(detect_frame.shape[:2], (camera.DETECTION_H, camera.DETECTION_W))
+        self.assertEqual(gray.shape, (camera.DETECTION_H, camera.DETECTION_W))
+        fake_cv2.resize.assert_called_once()
+        fake_cv2.cvtColor.assert_called_once()
+
     def test_show_returns_false_on_escape(self):
         import handtracking_camera as camera
 

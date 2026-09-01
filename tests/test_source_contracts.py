@@ -11,6 +11,8 @@ MODES_SOURCE = (ROOT / "handtracking_modes.py").read_text(encoding="utf-8")
 WORKER_SOURCE = (ROOT / "handtracking_mediapipe.py").read_text(encoding="utf-8")
 CAMERA_SOURCE = (ROOT / "handtracking_camera.py").read_text(encoding="utf-8")
 SESSION_SOURCE = (ROOT / "handtracking_session.py").read_text(encoding="utf-8")
+STATE_SOURCE = (ROOT / "handtracking_state.py").read_text(encoding="utf-8")
+FLOW_SOURCE = (ROOT / "handtracking_flow.py").read_text(encoding="utf-8")
 HUD_SOURCE = (
     (ROOT / "handtracking_hud.py").read_text(encoding="utf-8")
     if (ROOT / "handtracking_hud.py").exists() else ""
@@ -97,6 +99,7 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn("mp_error_count", SOURCE)
         self.assertIn("mp_last_error", SOURCE)
         self.assertIn("MP ERR", HUD_SOURCE)
+        self.assertIn("PERF cam", HUD_SOURCE)
 
     def test_mediapipe_errors_are_observable(self):
         self.assertRegex(WORKER_SOURCE, r"except Exception as \w+")
@@ -140,6 +143,21 @@ class SourceContractTests(unittest.TestCase):
         self.assertNotIn("enqueued_at, input_seq = packet", SOURCE)
         self.assertNotIn("gray, ts, now, mp_input_seq)", SOURCE)
 
+    def test_worker_is_event_driven_instead_of_polling_every_millisecond(self):
+        self.assertIn("_pending_event", WORKER_SOURCE)
+        self.assertNotIn("wait(0.001)", WORKER_SOURCE)
+        self.assertIn("_pending_event.set()", WORKER_SOURCE)
+
+    def test_hot_runtime_state_uses_slotted_dataclasses(self):
+        self.assertGreaterEqual(STATE_SOURCE.count("@dataclass(slots=True)"), 8)
+        self.assertIn("@dataclass(slots=True)\nclass RuntimeSession", SESSION_SOURCE)
+
+    def test_flow_dispatch_avoids_temporary_numpy_vectors(self):
+        dispatch = FLOW_SOURCE[FLOW_SOURCE.index("def dispatch_flow_motion"):]
+        self.assertNotIn("np.array([motion_dx, motion_dy]", dispatch)
+        self.assertNotIn("np.linalg.norm(pointer.motion_accum)", dispatch)
+        self.assertNotIn("np.linalg.norm(out)", dispatch)
+
     def test_precision_snap_does_not_use_obsolete_dwell_names(self):
         self.assertNotIn("DWELL_RADIUS_PX", SOURCE)
         self.assertNotIn("dwell assistito", SOURCE)
@@ -151,6 +169,30 @@ class SourceContractTests(unittest.TestCase):
     def test_runtime_has_stale_mediapipe_fail_safe(self):
         self.assertIn("MP_RESULT_STALE_SECONDS", SOURCE)
         self.assertIn("tracking_result_is_stale", SOURCE)
+
+    def test_runtime_uses_session_as_single_scalar_source_of_truth(self):
+        mirrored_assignments = (
+            "session.latest_result = latest_result",
+            "latest_result = session.latest_result",
+            "session.commands_enabled = commands_enabled",
+            "commands_enabled = session.commands_enabled",
+            "session.gesture_input_block_until = gesture_input_block_until",
+            "gesture_input_block_until = session.gesture_input_block_until",
+            "session.precision_snap_active = precision_snap_active",
+            "precision_snap_active = session.precision_snap_active",
+        )
+        for text in mirrored_assignments:
+            with self.subTest(text=text):
+                self.assertNotIn(text, SOURCE)
+
+    def test_runtime_profiles_and_gates_optical_flow(self):
+        self.assertIn("should_measure_optical_flow", SOURCE)
+        self.assertIn("session.perf", SOURCE)
+        self.assertIn("camera.prepare_detection", SOURCE)
+        self.assertNotIn("camera.read_prepared()", SOURCE)
+
+    def test_runtime_does_not_cache_full_frame_skeleton_overlay(self):
+        self.assertNotIn("session.overlay_layer", SOURCE)
 
     def test_landmarker_is_owned_by_worker_module(self):
         self.assertTrue((ROOT / "handtracking_mediapipe.py").exists())

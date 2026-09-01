@@ -9,7 +9,7 @@ from handtracking_config import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StaleResetResult:
     paused_by_fist: bool = False
     latest_result: object | None = None
@@ -31,7 +31,7 @@ class StaleResetResult:
             object.__setattr__(self, "fist_states", [])
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MissingHandsResult:
     paused_by_fist: bool
     gesture_input_block_until: float
