@@ -39,8 +39,15 @@ class FakeWorker:
         self.stopped = False
         self.joined = False
         self.input_seq = 0
+        self.overwrites = 0
+        self.error_count = 0
+        self.last_error = ""
+        self.last_success_at = time.perf_counter()
+        self.last_result_input_at = time.perf_counter()
+        self.running = True
 
     def start(self):
+        self.running = True
         return None
 
     def is_alive(self):
@@ -56,28 +63,22 @@ class FakeWorker:
         )
         self.latest = (self.seq, result, gray, 1.0, 1.0, 16.0, 0.0)
 
-    def snapshot(self):
-        return self.latest
-
-    def stats(self):
+    def snapshot_state(self):
         return {
+            "latest": self.latest,
             "seq": self.seq,
             "input_seq": self.input_seq,
-            "overwrites": 0,
-            "error_count": 0,
-            "last_error": "",
-            "last_success_at": time.perf_counter(),
-            "last_result_input_at": time.perf_counter(),
+            "overwrites": self.overwrites,
+            "error_count": self.error_count,
+            "last_error": self.last_error,
+            "last_success_at": self.last_success_at,
+            "last_result_input_at": self.last_result_input_at,
+            "alive": self.is_alive(),
         }
-
-    def snapshot_state(self):
-        state = self.stats()
-        state["latest"] = self.latest
-        state["alive"] = self.is_alive()
-        return state
 
     def stop(self):
         self.stopped = True
+        self.running = False
 
     def join(self, timeout=None):
         self.joined = True
@@ -89,6 +90,8 @@ class FakeCursor:
         self.started = False
         self._active = False
         self._position = (100, 100)
+        self.running = True
+        self.last_error = ""
 
     @property
     def active(self):
@@ -115,6 +118,88 @@ class FakeCursor:
     def close(self):
         self.closed = True
         self._active = False
+        self.running = False
+
+
+class FakeRuntimeCamera:
+    def __init__(self, frames=1):
+        self.frames = frames
+        self.gray = np.zeros((360, 640), dtype=np.uint8)
+        self.closed = False
+        self.prepare_calls = 0
+        self.reported_fps = 60.0
+        self.reported_w = 1280
+        self.reported_h = 720
+        self.codec = "MJPG"
+        self.target_fps = 60
+
+    def read_frame(self):
+        if self.frames <= 0:
+            return None
+        self.frames -= 1
+        return np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    def prepare_detection(self, frame):
+        self.prepare_calls += 1
+        return frame, self.gray
+
+    def show(self, frame):
+        return self.frames > 0
+
+    def close(self):
+        self.closed = True
+
+
+class PacketWorker:
+    def __init__(self, packets, *, stale=False):
+        self.packets = list(packets)
+        self.stale = stale
+        self.index = 0
+        self.stopped = False
+        self.joined = False
+        self.input_seq = 0
+        self.overwrites = 0
+        self.error_count = 0
+        self.last_error = ""
+
+    def start(self):
+        return None
+
+    def is_alive(self):
+        return not self.stopped
+
+    def submit(self, frame, gray, timestamp_ms, enqueued_at):
+        self.input_seq += 1
+
+    def snapshot_state(self):
+        packet = self.packets[min(self.index, len(self.packets) - 1)]
+        self.index += 1
+        result_input_at = time.perf_counter() - (1.0 if self.stale else 0.0)
+        return {
+            "latest": packet,
+            "seq": packet[0] if packet is not None else 0,
+            "input_seq": self.input_seq,
+            "overwrites": self.overwrites,
+            "error_count": self.error_count,
+            "last_error": self.last_error,
+            "last_success_at": time.perf_counter(),
+            "last_result_input_at": result_input_at,
+            "alive": self.is_alive(),
+        }
+
+    def stop(self):
+        self.stopped = True
+
+    def join(self, timeout=None):
+        self.joined = True
+
+
+class NullHud:
+    def should_refresh(self, frame, now):
+        return False
+
+    def apply(self, frame):
+        return None
 
 
 class RuntimeSmokeTests(unittest.TestCase):
@@ -134,6 +219,194 @@ class RuntimeSmokeTests(unittest.TestCase):
             )
 
         return create
+
+    @staticmethod
+    def _make_runtime_session(camera, worker, cursor):
+        from handtracking_session import RuntimeSession
+
+        now = time.perf_counter()
+        session = RuntimeSession(
+            camera=camera,
+            worker=worker,
+            cursor=cursor,
+            screen_w=1920,
+            screen_h=1080,
+            start_time=now - 1.0,
+            last_hand_seen=now,
+            fps_window_start=now,
+            mp_fps_window_start=now,
+            camera_target_fps=60,
+        )
+        session.hud_layer = NullHud()
+        session.commands_enabled = True
+        return session
+
+    @staticmethod
+    def _run_runtime_session(session, *, motion=None, execute_swipe=None,
+                             mouse_wheel=None):
+        import handtracking_runtime as runtime
+
+        patches = [
+            mock.patch.object(runtime, "draw_runtime_overlays"),
+            mock.patch.object(runtime, "draw_runtime_hud"),
+        ]
+        if motion is not None:
+            patches.append(
+                mock.patch.object(runtime, "measure_optical_flow",
+                                  return_value=motion)
+            )
+        if execute_swipe is not None:
+            patches.append(mock.patch.object(runtime, "execute_swipe",
+                                              execute_swipe))
+        if mouse_wheel is not None:
+            patches.append(mock.patch.object(runtime, "mouse_wheel", mouse_wheel))
+        try:
+            for patcher in patches:
+                patcher.start()
+            try:
+                return runtime._run_impl(session)
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+        finally:
+            session.close()
+
+    @staticmethod
+    def _packet(seq):
+        result = SimpleNamespace(
+            hand_landmarks=[],
+            hand_world_landmarks=[],
+            handedness=[],
+        )
+        return (seq, result, object(), 1.0, 1.0, 16.0, 0.0)
+
+    def test_runtime_does_not_replay_stale_packet_after_fail_safe(self):
+        camera = FakeRuntimeCamera()
+        worker = PacketWorker([self._packet(8)], stale=True)
+        cursor = FakeCursor()
+        session = self._make_runtime_session(camera, worker, cursor)
+        session.latest_result_seq = 7
+        session.pointer.pinch_held = True
+
+        self._run_runtime_session(session)
+
+        self.assertEqual(session.latest_result_seq, 7)
+        self.assertIsNone(session.latest_result)
+        self.assertFalse(session.pointer.pinch_held)
+
+    def test_packet_only_preprocessing_is_skipped_when_stale_or_locked(self):
+        for stale, commands_enabled in ((True, True), (False, False)):
+            with self.subTest(stale=stale, commands_enabled=commands_enabled):
+                camera = FakeRuntimeCamera()
+                worker = PacketWorker([self._packet(1)], stale=stale)
+                session = self._make_runtime_session(camera, worker, FakeCursor())
+                session.commands_enabled = commands_enabled
+                session.mp_scheduler = SimpleNamespace(should_submit=lambda *a, **k: False)
+                self._run_runtime_session(session)
+                self.assertEqual(camera.prepare_calls, 0)
+
+    def test_fresh_packet_resets_lost_motion_before_flow_dispatch(self):
+        from handtracking_flow import LKMotion
+
+        cases = ("scroll", "swipe", "pointer")
+        for mode in cases:
+            with self.subTest(mode=mode):
+                camera = FakeRuntimeCamera()
+                worker = PacketWorker([self._packet(1)])
+                cursor = FakeCursor()
+                session = self._make_runtime_session(camera, worker, cursor)
+                session.last_hand_seen = time.perf_counter() - 1.0
+                session.flow.prev_gray = np.zeros((360, 640), dtype=np.uint8)
+                session.flow.points = np.zeros((5, 1, 2), dtype=np.float32)
+                session.flow.active = True
+                session.flow.time = time.perf_counter() - 0.1
+
+                wheel = mock.Mock()
+                swipe = mock.Mock(return_value="sent")
+                if mode == "scroll":
+                    session.scroll.active = True
+                    motion = LKMotion(session.flow.points, 0.0, 2.0, 2.0)
+                elif mode == "swipe":
+                    session.swipe.tracking = True
+                    motion = LKMotion(session.flow.points, 6.0, 0.0, 6.0)
+                else:
+                    session.pointer.pinch_held = True
+                    session.pointer.move_active = True
+                    motion = LKMotion(session.flow.points, 0.0, 2.0, 2.0)
+
+                self._run_runtime_session(
+                    session,
+                    motion=motion,
+                    execute_swipe=swipe,
+                    mouse_wheel=wheel,
+                )
+
+                wheel.assert_not_called()
+                swipe.assert_not_called()
+                self.assertEqual(cursor.position(), (100, 100))
+
+    def test_duplicate_fresh_packet_still_dispatches_camera_rate_flow(self):
+        from handtracking_flow import LKMotion
+
+        camera = FakeRuntimeCamera()
+        worker = PacketWorker([self._packet(1)])
+        cursor = FakeCursor()
+        session = self._make_runtime_session(camera, worker, cursor)
+        session.latest_result_seq = 1
+        session.scroll.active = True
+        session.flow.prev_gray = np.zeros((360, 640), dtype=np.uint8)
+        session.flow.points = np.zeros((5, 1, 2), dtype=np.float32)
+        session.flow.active = True
+        wheel = mock.Mock()
+
+        self._run_runtime_session(
+            session,
+            motion=LKMotion(session.flow.points, 0.0, 2.0, 2.0),
+            mouse_wheel=wheel,
+        )
+
+        wheel.assert_called_once()
+
+    def test_consecutive_fresh_pointer_packets_do_not_starve_lk_motion(self):
+        from handtracking_flow import LKMotion
+
+        camera = FakeRuntimeCamera(frames=3)
+        worker = PacketWorker([self._packet(1), self._packet(2), self._packet(3)])
+        cursor = FakeCursor()
+        session = self._make_runtime_session(camera, worker, cursor)
+        session.pointer.pinch_held = True
+        session.flow.prev_gray = np.zeros((360, 640), dtype=np.uint8)
+        session.flow.points = np.zeros((5, 1, 2), dtype=np.float32)
+        session.flow.active = True
+
+        self._run_runtime_session(
+            session,
+            motion=LKMotion(session.flow.points, 5.0, 0.0, 5.0),
+        )
+
+        self.assertNotEqual(cursor.position(), (100, 100))
+
+    def test_runtime_cleans_up_when_cursor_worker_dies(self):
+        import handtracking_runtime as runtime
+
+        class DeadCursor(FakeCursor):
+            def __init__(self):
+                super().__init__()
+                self.running = False
+                self.last_error = "RuntimeError: cursor failed"
+
+        camera = FakeRuntimeCamera()
+        worker = PacketWorker([self._packet(1)])
+        cursor = DeadCursor()
+        session = self._make_runtime_session(camera, worker, cursor)
+
+        with self.assertRaisesRegex(RuntimeError, "Cursor worker stopped.*cursor failed"):
+            self._run_runtime_session(session)
+
+        self.assertTrue(worker.stopped)
+        self.assertTrue(worker.joined)
+        self.assertTrue(camera.closed)
+        self.assertTrue(cursor.closed)
 
     def test_no_hand_runtime_starts_and_cleans_up_without_real_devices(self):
         import handtracking_runtime as runtime
@@ -199,8 +472,8 @@ class RuntimeSmokeTests(unittest.TestCase):
             def is_alive(self):
                 return False
 
-            def stats(self):
-                state = super().stats()
+            def snapshot_state(self):
+                state = super().snapshot_state()
                 state["error_count"] = 1
                 state["last_error"] = "RuntimeError: init failed"
                 state["last_success_at"] = None

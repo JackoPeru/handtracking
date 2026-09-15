@@ -5,9 +5,10 @@ import numpy as np
 
 
 class FakeCapture:
-    def __init__(self, *, opened=True, frame=None):
+    def __init__(self, *, opened=True, frame=None, release_error=None):
         self.opened = opened
         self.frame = frame
+        self.release_error = release_error
         self.released = False
         self.set_calls = []
         self.props = {}
@@ -31,6 +32,8 @@ class FakeCapture:
 
     def release(self):
         self.released = True
+        if self.release_error is not None:
+            raise self.release_error
 
 
 class CameraRuntimeTests(unittest.TestCase):
@@ -71,7 +74,86 @@ class CameraRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.reported_w, 1280)
         self.assertEqual(runtime.reported_h, 720)
 
-    def test_read_prepared_flips_resizes_and_builds_grayscale_detection_frame(self):
+    def test_open_releases_failed_fallback_capture(self):
+        import handtracking_camera as camera
+
+        first = FakeCapture(opened=False)
+        second = FakeCapture(opened=False)
+        fake_cv2 = mock.Mock(wraps=camera.cv2)
+        fake_cv2.VideoCapture.side_effect = [first, second]
+
+        with self.assertRaisesRegex(RuntimeError, "Impossibile aprire la webcam"):
+            camera.CameraRuntime.open(cv2_module=fake_cv2)
+
+        self.assertTrue(first.released)
+        self.assertTrue(second.released)
+
+    def test_open_still_attempts_fallback_when_msmf_release_fails(self):
+        import handtracking_camera as camera
+
+        first = FakeCapture(
+            opened=False,
+            release_error=RuntimeError("MSMF release failed"),
+        )
+        second = FakeCapture(opened=True)
+        second.props = {
+            camera.cv2.CAP_PROP_FPS: 60.0,
+            camera.cv2.CAP_PROP_FRAME_WIDTH: 1280.0,
+            camera.cv2.CAP_PROP_FRAME_HEIGHT: 720.0,
+            camera.cv2.CAP_PROP_FOURCC: camera.cv2.VideoWriter_fourcc(*"MJPG"),
+        }
+        fake_cv2 = mock.Mock(wraps=camera.cv2)
+        fake_cv2.VideoCapture.side_effect = [first, second]
+        fake_cv2.namedWindow = mock.Mock()
+        fake_cv2.setWindowProperty = mock.Mock()
+
+        runtime = camera.CameraRuntime.open(cv2_module=fake_cv2)
+
+        self.assertIs(runtime.capture, second)
+        self.assertTrue(first.released)
+        runtime.close()
+
+    def test_open_cleans_capture_and_window_when_configuration_fails(self):
+        import handtracking_camera as camera
+
+        capture = FakeCapture(opened=True)
+        fake_cv2 = mock.Mock(wraps=camera.cv2)
+        fake_cv2.VideoCapture.return_value = capture
+        fake_cv2.namedWindow = mock.Mock()
+        fake_cv2.setWindowProperty = mock.Mock(
+            side_effect=RuntimeError("window config failed")
+        )
+        fake_cv2.destroyAllWindows = mock.Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "window config failed"):
+            camera.CameraRuntime.open(cv2_module=fake_cv2)
+
+        self.assertTrue(capture.released)
+        fake_cv2.destroyAllWindows.assert_called_once()
+
+    def test_open_preserves_configuration_error_when_cleanup_fails(self):
+        import handtracking_camera as camera
+
+        capture = FakeCapture(
+            opened=True,
+            release_error=RuntimeError("release failed"),
+        )
+        fake_cv2 = mock.Mock(wraps=camera.cv2)
+        fake_cv2.VideoCapture.return_value = capture
+        fake_cv2.namedWindow = mock.Mock(
+            side_effect=RuntimeError("window config failed")
+        )
+        fake_cv2.destroyAllWindows = mock.Mock(
+            side_effect=RuntimeError("destroy failed")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "window config failed"):
+            camera.CameraRuntime.open(cv2_module=fake_cv2)
+
+        self.assertTrue(capture.released)
+        fake_cv2.destroyAllWindows.assert_called_once()
+
+    def test_read_frame_flips_and_prepare_detection_builds_detection_frames(self):
         import handtracking_camera as camera
 
         source = np.zeros((720, 1280, 3), dtype=np.uint8)
@@ -87,13 +169,13 @@ class CameraRuntimeTests(unittest.TestCase):
             cv2_module=camera.cv2,
         )
 
-        prepared = runtime.read_prepared()
+        frame = runtime.read_frame()
+        detect_frame, gray = runtime.prepare_detection(frame)
 
-        self.assertIsNotNone(prepared)
-        self.assertEqual(prepared.frame.shape, (720, 1280, 3))
-        self.assertEqual(prepared.detect_frame.shape[:2], (camera.DETECTION_H, camera.DETECTION_W))
-        self.assertEqual(prepared.gray.shape, (camera.DETECTION_H, camera.DETECTION_W))
-        self.assertGreater(prepared.frame[:, -10:].mean(), 200.0)
+        self.assertEqual(frame.shape, (720, 1280, 3))
+        self.assertEqual(detect_frame.shape[:2], (camera.DETECTION_H, camera.DETECTION_W))
+        self.assertEqual(gray.shape, (camera.DETECTION_H, camera.DETECTION_W))
+        self.assertGreater(frame[:, -10:].mean(), 200.0)
 
     def test_read_frame_defers_resize_and_grayscale_until_detection_is_needed(self):
         import handtracking_camera as camera

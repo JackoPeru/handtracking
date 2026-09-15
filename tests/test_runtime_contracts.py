@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,16 +31,46 @@ class RuntimeContractTests(unittest.TestCase):
         for package in ("mediapipe", "opencv-contrib-python", "numpy", "pycaw", "comtypes"):
             self.assertIn(package, text)
 
+    def test_hashed_lock_matches_direct_requirements(self):
+        requirements = {}
+        for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = re.fullmatch(r"([A-Za-z0-9_.-]+)==([^\s]+)", line)
+            self.assertIsNotNone(match, line)
+            name, version = match.groups()
+            requirements[re.sub(r"[-_.]+", "-", name).lower()] = version
+
+        lock = {}
+        for line in (ROOT / "requirements.lock").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = re.fullmatch(
+                r"([A-Za-z0-9_.-]+)==([^\s]+) --hash=sha256:([0-9a-f]{64})",
+                line,
+            )
+            self.assertIsNotNone(match, line)
+            name, version, _ = match.groups()
+            lock[re.sub(r"[-_.]+", "-", name).lower()] = version
+
+        for name, version in requirements.items():
+            self.assertEqual(lock.get(name), version, name)
+
     def test_launcher_can_bootstrap_virtualenv(self):
         launcher = (ROOT / "Avvia Hand Tracking.bat").read_text(encoding="utf-8")
-        self.assertIn("requirements.txt", launcher)
+        self.assertIn("requirements.lock", launcher)
         self.assertIn("-m venv", launcher)
-        self.assertIn("import cv2, mediapipe, numpy, pycaw, comtypes", launcher)
+        self.assertIn("--require-hashes", launcher)
+        self.assertIn("--only-binary=:all:", launcher)
 
     def test_launcher_requires_python_312_for_new_environment(self):
         launcher = (ROOT / "Avvia Hand Tracking.bat").read_text(encoding="utf-8")
         self.assertIn("py -3.12", launcher)
-        self.assertIn("sys.version_info >= (3, 12)", launcher)
+        self.assertIn("sys.version_info[:2] == (3, 12)", launcher)
+        self.assertIn("struct.calcsize('P') * 8 == 64", launcher)
+        self.assertIn("platform.python_implementation() == 'CPython'", launcher)
 
     def test_github_actions_runs_windows_python_312_checks(self):
         workflow = ROOT / ".github" / "workflows" / "tests.yml"
@@ -47,6 +78,12 @@ class RuntimeContractTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("windows-latest", text)
         self.assertIn("python-version: '3.12'", text)
+        self.assertIn("persist-credentials: false", text)
+        self.assertIn("contents: read", text)
+        self.assertRegex(text, r"actions/checkout@[0-9a-f]{40}")
+        self.assertRegex(text, r"actions/setup-python@[0-9a-f]{40}")
+        self.assertIn("--require-hashes", text)
+        self.assertIn("--only-binary=:all:", text)
         self.assertIn("unittest discover -s tests", text)
         self.assertIn("py_compile", text)
         self.assertIn("pip check", text)

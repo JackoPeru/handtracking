@@ -166,10 +166,6 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn("Path(__file__)", SESSION_SOURCE)
         self.assertNotIn('model_asset_path="hand_landmarker.task"', SESSION_SOURCE)
 
-    def test_runtime_has_stale_mediapipe_fail_safe(self):
-        self.assertIn("MP_RESULT_STALE_SECONDS", SOURCE)
-        self.assertIn("tracking_result_is_stale", SOURCE)
-
     def test_runtime_uses_session_as_single_scalar_source_of_truth(self):
         mirrored_assignments = (
             "session.latest_result = latest_result",

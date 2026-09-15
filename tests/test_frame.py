@@ -2,6 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
+
 from handtracking_session import RuntimeSession
 
 
@@ -29,6 +31,15 @@ class FakeCursor:
         self._position = (self._position[0] + dx, self._position[1] + dy)
 
 
+def make_hand():
+    return [
+        SimpleNamespace(x=0.10 + (index % 5) * 0.01,
+                        y=0.20 + (index // 5) * 0.01,
+                        z=0.0)
+        for index in range(21)
+    ]
+
+
 def make_session():
     return RuntimeSession(
         camera=object(),
@@ -44,6 +55,132 @@ def make_session():
 
 
 class FrameProcessorTests(unittest.TestCase):
+    def test_stale_packet_is_ignored_without_rearming_gesture_state(self):
+        from handtracking_frame import process_mediapipe_packet
+
+        session = make_session()
+        session.latest_result_seq = 7
+        previous = object()
+        session.latest_result = previous
+        session.pointer.pinch_held = False
+        stale_result = SimpleNamespace(
+            hand_landmarks=[make_hand()], hand_world_landmarks=[], handedness=[],
+        )
+        packet = (8, stale_result, object(), 1.0, 1.0, 1.0, 1.0)
+
+        result = process_mediapipe_packet(
+            session,
+            packet,
+            gray=object(),
+            now=5.0,
+            camera_target_fps=60,
+            mp_result_stale=True,
+        )
+
+        self.assertFalse(result.processed)
+        self.assertFalse(result.skip_frame)
+        self.assertEqual(session.latest_result_seq, 7)
+        self.assertIs(session.latest_result, previous)
+        self.assertFalse(session.pointer.pinch_held)
+
+    def test_reanchor_skips_lk_when_no_motion_consumer_is_active(self):
+        from handtracking_frame import reanchor_flow
+
+        session = make_session()
+        session.commands_enabled = True
+        session.flow.prev_gray = object()
+        previous_points = object()
+        session.flow.points = previous_points
+        session.flow.active = True
+
+        with mock.patch(
+            "handtracking_flow.cv2.calcOpticalFlowPyrLK",
+            side_effect=AssertionError("idle reanchor must not call LK"),
+        ):
+            corrected = reanchor_flow(
+                session,
+                make_hand(),
+                object(),
+                object(),
+            )
+
+        self.assertIsNone(corrected)
+        self.assertIs(session.flow.points, previous_points)
+
+    def test_reanchor_seeds_identical_frame_without_running_lk(self):
+        from handtracking_frame import reanchor_flow
+
+        session = make_session()
+        session.commands_enabled = True
+        session.pointer.pinch_held = True
+        current_gray = object()
+        result_gray = current_gray
+
+        with mock.patch(
+            "handtracking_flow.cv2.calcOpticalFlowPyrLK",
+            side_effect=AssertionError("engagement seed must not call LK"),
+        ):
+            corrected = reanchor_flow(
+                session,
+                make_hand(),
+                result_gray,
+                current_gray,
+            )
+
+        self.assertIsNotNone(corrected)
+        self.assertIsNotNone(session.flow.points)
+        self.assertIs(session.flow.prev_gray, current_gray)
+
+    def test_reanchor_corrects_delayed_points_on_each_motion_engagement(self):
+        from handtracking_frame import reanchor_flow
+
+        expected = np.array([[[72, 75]], [[72, 78.6]], [[97.6, 78.6]],
+                             [[91.2, 82.2]], [[84.8, 85.8]]], dtype=np.float32)
+        for mode in ("pointer", "scroll", "swipe"):
+            with self.subTest(mode=mode):
+                session = make_session()
+                session.commands_enabled = True
+                session.last_hand_seen = 10.0
+                if mode == "pointer":
+                    session.pointer.pinch_held = True
+                elif mode == "scroll":
+                    session.scroll.active = True
+                else:
+                    session.swipe.pose_last_seen = 9.95
+                old_gray = np.zeros((360, 640), dtype=np.uint8)
+                current_gray = np.ones((360, 640), dtype=np.uint8)
+
+                def lk(old, new, points, unused, **kwargs):
+                    self.assertIs(old, old_gray)
+                    self.assertIs(new, current_gray)
+                    return (points + np.array([[[8, 3]]], dtype=np.float32),
+                            np.ones((5, 1), dtype=np.uint8), np.zeros((5, 1)))
+
+                with mock.patch("handtracking_flow.cv2.calcOpticalFlowPyrLK", lk):
+                    corrected = reanchor_flow(session, make_hand(), old_gray, current_gray)
+
+                self.assertIsNotNone(corrected)
+                np.testing.assert_allclose(corrected, expected, atol=0.0001)
+                np.testing.assert_allclose(session.flow.points, expected, atol=0.0001)
+                self.assertIs(session.flow.prev_gray, current_gray)
+                self.assertTrue(session.flow.active)
+
+    def test_failed_reanchor_invalidates_points_before_next_flow(self):
+        from handtracking_frame import reanchor_flow
+
+        session = make_session()
+        session.commands_enabled = True
+        session.pointer.pinch_held = True
+        session.flow.points = object()
+        session.flow.prev_gray = object()
+        session.flow.active = True
+        with mock.patch("handtracking_flow.cv2.calcOpticalFlowPyrLK",
+                        return_value=(None, None, None)):
+            corrected = reanchor_flow(session, make_hand(), object(), object())
+        self.assertIsNone(corrected)
+        self.assertIsNone(session.flow.points)
+        self.assertFalse(session.flow.active)
+
     def test_duplicate_packet_is_ignored_without_mutating_session(self):
         from handtracking_frame import process_mediapipe_packet
 

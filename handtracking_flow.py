@@ -145,8 +145,9 @@ def commit_flow_measurement(flow, gray, motion, *, now):
 def should_measure_optical_flow(*, now, mp_result_stale, paused_by_fist,
                                 commands_enabled, spock_blocking,
                                 gesture_input_block_until, pointer, volume,
-                                two_hand, radial, scroll, swipe, flow):
-    if flow.prev_gray is None or flow.points is None:
+                                two_hand, radial, scroll, swipe, flow,
+                                require_anchors=True):
+    if require_anchors and (flow.prev_gray is None or flow.points is None):
         return False
     if (mp_result_stale or paused_by_fist or not commands_enabled or
             spock_blocking or now < gesture_input_block_until):

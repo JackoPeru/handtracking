@@ -31,7 +31,6 @@ class POINT(ctypes.Structure):
 
 _user32 = None
 _volume_endpoint = None
-_volume_initialized = False
 
 
 def get_user32():
@@ -53,7 +52,8 @@ def screen_size(user32=None):
 def cursor_position(user32=None):
     api = user32 or get_user32()
     point = POINT()
-    api.GetCursorPos(ctypes.byref(point))
+    if not api.GetCursorPos(ctypes.byref(point)):
+        raise OSError("GetCursorPos failed")
     return int(point.x), int(point.y)
 
 
@@ -66,8 +66,18 @@ def mouse_up(user32=None):
 
 
 def left_click(user32=None):
-    mouse_down(user32)
-    mouse_up(user32)
+    error = None
+    try:
+        mouse_down(user32)
+        mouse_up(user32)
+    except BaseException as exc:
+        error = exc
+        try:
+            mouse_up(user32)
+        except BaseException:
+            pass
+    if error is not None:
+        raise error
 
 
 def mouse_wheel(delta, user32=None):
@@ -85,21 +95,56 @@ def key_up(vk, user32=None):
 
 def tap_combo(vk, modifiers=(), user32=None):
     api = user32 or get_user32()
-    for mod in modifiers:
-        key_down(mod, api)
-    key_down(vk, api)
-    key_up(vk, api)
-    for mod in reversed(modifiers):
-        key_up(mod, api)
+    pressed = []
+    error = None
+    try:
+        for mod in modifiers:
+            pressed.append(mod)
+            key_down(mod, api)
+        pressed.append(vk)
+        key_down(vk, api)
+        key_up(vk, api)
+        pressed.pop()
+    except BaseException as exc:
+        error = exc
+
+    release_error = None
+    while pressed:
+        key = pressed.pop()
+        try:
+            key_up(key, api)
+        except BaseException as exc:
+            if release_error is None:
+                release_error = exc
+            try:
+                key_up(key, api)
+            except BaseException:
+                pass
+    if error is not None:
+        raise error
+    if release_error is not None:
+        raise release_error
 
 
 def ctrl_wheel(delta, user32=None):
     api = user32 or get_user32()
-    key_down(VK_CONTROL, api)
+    error = None
     try:
+        key_down(VK_CONTROL, api)
         mouse_wheel(delta, api)
-    finally:
+    except BaseException as exc:
+        error = exc
+    try:
         key_up(VK_CONTROL, api)
+    except BaseException as exc:
+        if error is None:
+            error = exc
+        try:
+            key_up(VK_CONTROL, api)
+        except BaseException:
+            pass
+    if error is not None:
+        raise error
 
 
 def foreground_window_title(user32=None):
@@ -142,28 +187,63 @@ def execute_radial_action(action, user32=None):
     return ""
 
 
-def _get_volume_endpoint():
-    global _volume_endpoint, _volume_initialized
-    if not _volume_initialized:
-        _volume_initialized = True
+def _invalidate_volume_endpoint():
+    global _volume_endpoint
+    _volume_endpoint = None
+
+
+def _get_volume_endpoint(*, refresh=False):
+    global _volume_endpoint
+    if refresh or _volume_endpoint is None:
         try:
-            _volume_endpoint = AudioUtilities.GetSpeakers().EndpointVolume
+            endpoint = AudioUtilities.GetSpeakers().EndpointVolume
         except Exception:
-            _volume_endpoint = None
+            _invalidate_volume_endpoint()
+            return None
+        if endpoint is None:
+            _invalidate_volume_endpoint()
+            return None
+        _volume_endpoint = endpoint
     return _volume_endpoint
 
 
 def get_system_volume():
-    endpoint = _get_volume_endpoint()
+    endpoint = _get_volume_endpoint(refresh=True)
     if endpoint is None:
         return 0.5
-    return float(endpoint.GetMasterVolumeLevelScalar())
+    try:
+        return float(endpoint.GetMasterVolumeLevelScalar())
+    except Exception:
+        _invalidate_volume_endpoint()
+        endpoint = _get_volume_endpoint(refresh=True)
+        if endpoint is None:
+            return 0.5
+        try:
+            return float(endpoint.GetMasterVolumeLevelScalar())
+        except Exception:
+            _invalidate_volume_endpoint()
+            return 0.5
 
 
 def set_system_volume(value):
-    endpoint = _get_volume_endpoint()
-    if endpoint is not None:
-        endpoint.SetMasterVolumeLevelScalar(clamp(value, 0.0, 1.0), None)
+    endpoint = _get_volume_endpoint(refresh=True)
+    if endpoint is None:
+        return False
+    level = clamp(value, 0.0, 1.0)
+    try:
+        endpoint.SetMasterVolumeLevelScalar(level, None)
+        return True
+    except Exception:
+        _invalidate_volume_endpoint()
+        endpoint = _get_volume_endpoint()
+        if endpoint is None:
+            return False
+        try:
+            endpoint.SetMasterVolumeLevelScalar(level, None)
+            return True
+        except Exception:
+            _invalidate_volume_endpoint()
+            return False
 
 
 class CursorController:
@@ -175,6 +255,7 @@ class CursorController:
         self._lock = threading.Lock()
         self._target = [0.0, 0.0]
         self._active = False
+        self._last_error = ""
         self._stop_event = threading.Event()
         self._thread = None
 
@@ -198,6 +279,11 @@ class CursorController:
     def running(self):
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def last_error(self):
+        with self._lock:
+            return self._last_error
+
     def screen_size(self):
         return screen_size(self.user32)
 
@@ -205,7 +291,8 @@ class CursorController:
         return cursor_position(self.user32)
 
     def set_position(self, x, y):
-        self.user32.SetCursorPos(int(round(x)), int(round(y)))
+        if not self.user32.SetCursorPos(int(round(x)), int(round(y))):
+            raise OSError("SetCursorPos failed")
 
     def sync(self, active):
         active = bool(active)
@@ -231,6 +318,8 @@ class CursorController:
     def start(self):
         if self.running:
             return
+        with self._lock:
+            self._last_error = ""
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._worker,
@@ -251,19 +340,24 @@ class CursorController:
             thread.join(timeout=0.5)
 
     def _worker(self):
-        last = time.perf_counter()
-        while not self._stop_event.is_set():
-            now = time.perf_counter()
-            dt = max(now - last, 1.0 / 500.0)
-            last = now
+        try:
+            last = time.perf_counter()
+            while not self._stop_event.is_set():
+                now = time.perf_counter()
+                dt = max(now - last, 1.0 / 500.0)
+                last = now
+                with self._lock:
+                    active = self._active
+                    tx, ty = self._target
+                if active:
+                    x, y = self.position()
+                    alpha = 1.0 - math.exp(-dt / self._interp_tau)
+                    nx = x + (tx - x) * alpha
+                    ny = y + (ty - y) * alpha
+                    if abs(tx - x) > 0.5 or abs(ty - y) > 0.5:
+                        self.set_position(nx, ny)
+                self._stop_event.wait(1.0 / self._output_hz)
+        except Exception as exc:
             with self._lock:
-                active = self._active
-                tx, ty = self._target
-            if active:
-                x, y = self.position()
-                alpha = 1.0 - math.exp(-dt / self._interp_tau)
-                nx = x + (tx - x) * alpha
-                ny = y + (ty - y) * alpha
-                if abs(tx - x) > 0.5 or abs(ty - y) > 0.5:
-                    self.user32.SetCursorPos(int(round(nx)), int(round(ny)))
-            self._stop_event.wait(1.0 / self._output_hz)
+                self._active = False
+                self._last_error = f"{type(exc).__name__}: {exc}"[:140]

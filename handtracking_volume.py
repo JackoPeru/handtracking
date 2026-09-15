@@ -106,9 +106,22 @@ def update_volume_state(
                 len(volume.delta_history) // 2
             ]
             if abs(stable_delta) >= VOLUME_DEADZONE_RAD:
-                volume.level = clamp(
+                candidate_level = clamp(
                     volume.level + stable_delta * VOLUME_GAIN * VOLUME_DIRECTION,
                     0.0,
                     1.0,
                 )
-                set_volume_cb(volume.level)
+                try:
+                    write_result = set_volume_cb(candidate_level)
+                except Exception:
+                    write_result = False
+                if write_result is False:
+                    volume.reset()
+                    scroll.reset()
+                    cursor.sync(True)
+                    flow.clear_motion()
+                    return False
+                volume.level = candidate_level
+                return True
+
+    return True

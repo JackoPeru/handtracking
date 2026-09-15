@@ -36,7 +36,7 @@ class FakeFactory:
 
 
 class MediaPipeWorkerTests(unittest.TestCase):
-    def test_snapshot_state_returns_result_and_stats_from_one_locked_snapshot(self):
+    def test_snapshot_state_returns_result_and_worker_metadata_from_one_snapshot(self):
         from handtracking_mediapipe import MediaPipeWorker
 
         worker = MediaPipeWorker(
@@ -48,7 +48,7 @@ class MediaPipeWorkerTests(unittest.TestCase):
         worker.start()
         worker.submit("frame", "gray", 1, enqueued_at)
         deadline = time.time() + 1.0
-        while worker.stats()["seq"] == 0 and time.time() < deadline:
+        while worker.snapshot_state()["seq"] == 0 and time.time() < deadline:
             time.sleep(0.01)
 
         state = worker.snapshot_state()
@@ -92,13 +92,13 @@ class MediaPipeWorkerTests(unittest.TestCase):
         worker.start()
         worker.submit("frame", "gray", 1, enqueued_at)
         deadline = time.time() + 1.0
-        while worker.stats()["seq"] == 0 and time.time() < deadline:
+        while worker.snapshot_state()["seq"] == 0 and time.time() < deadline:
             time.sleep(0.01)
-        stats = worker.stats()
+        state = worker.snapshot_state()
         worker.stop()
         worker.join(timeout=1.0)
 
-        self.assertAlmostEqual(stats["last_result_input_at"], enqueued_at, places=5)
+        self.assertAlmostEqual(state["last_result_input_at"], enqueued_at, places=5)
 
     def test_worker_reports_errors_without_dying(self):
         from handtracking_mediapipe import MediaPipeWorker
@@ -115,13 +115,14 @@ class MediaPipeWorkerTests(unittest.TestCase):
         worker.start()
         worker.submit("frame", "gray", 1, time.perf_counter())
         deadline = time.time() + 1.0
-        while worker.error_count == 0 and time.time() < deadline:
+        while worker.snapshot_state()["error_count"] == 0 and time.time() < deadline:
             time.sleep(0.01)
+        state = worker.snapshot_state()
         worker.stop()
         worker.join(timeout=1.0)
 
-        self.assertGreaterEqual(worker.error_count, 1)
-        self.assertIn("RuntimeError", worker.last_error)
+        self.assertGreaterEqual(state["error_count"], 1)
+        self.assertIn("RuntimeError", state["last_error"])
 
 
 if __name__ == "__main__":

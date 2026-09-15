@@ -8,6 +8,7 @@ from handtracking_flow import (
     cursor_gain_for_speed,
     flow_points_from_hand,
     propagate_points,
+    should_measure_optical_flow,
 )
 from handtracking_gestures import (
     control_point,
@@ -156,12 +157,36 @@ def process_pointer(
 
 
 def reanchor_flow(session, control_hand, result_gray, gray):
+    if control_hand is None or not should_measure_optical_flow(
+        now=session.last_hand_seen,
+        mp_result_stale=False,
+        paused_by_fist=session.paused_by_fist,
+        commands_enabled=session.commands_enabled,
+        spock_blocking=session.spock.blocking,
+        gesture_input_block_until=session.gesture_input_block_until,
+        pointer=session.pointer,
+        volume=session.volume,
+        two_hand=session.two_hand,
+        radial=session.radial,
+        scroll=session.scroll,
+        swipe=session.swipe,
+        flow=session.flow,
+        require_anchors=False,
+    ):
+        return None
+
     points = flow_points_from_hand(control_hand)
-    corrected = propagate_points(result_gray, gray, points)
+    corrected = (
+        points if gray is not None and result_gray is gray
+        else propagate_points(result_gray, gray, points)
+    )
     if corrected is not None:
         session.flow.points = corrected
         session.flow.prev_gray = gray
         session.flow.active = True
+    else:
+        session.flow.points = None
+        session.flow.active = False
     return corrected
 
 
@@ -191,7 +216,7 @@ def process_volume_scroll(
         session.two_hand.candidate_at is not None or session.radial.active or
         session.swipe.tracking
     )
-    update_volume_state(
+    volume_write_ok = update_volume_state(
         session.volume,
         now=now,
         dedicated_mode_block=dedicated_mode_block,
@@ -207,6 +232,11 @@ def process_volume_scroll(
         get_volume_cb=get_volume_cb,
         set_volume_cb=set_volume_cb,
     )
+    if volume_write_ok is False:
+        session.gesture_event = "VOLUME NON DISPONIBILE"
+        session.gesture_event_until = now + GESTURE_EVENT_SHOW_SECONDS
+        return
+
     update_scroll_state(
         session.scroll,
         now=now,

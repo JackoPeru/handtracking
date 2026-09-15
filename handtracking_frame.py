@@ -49,12 +49,15 @@ def process_mediapipe_packet(
     gray,
     now,
     camera_target_fps,
+    mp_result_stale=False,
     ctrl_wheel_cb=ctrl_wheel,
     execute_radial_action_cb=execute_radial_action,
     left_click_cb=left_click,
     get_volume_cb=get_system_volume,
     set_volume_cb=set_system_volume,
 ):
+    if mp_result_stale:
+        return FrameProcessResult(False)
     if packet is None or packet[0] == session.latest_result_seq:
         return FrameProcessResult(False)
 
@@ -170,7 +173,6 @@ def process_mediapipe_packet(
         left_click_cb=left_click_cb,
     )
 
-    corrected = reanchor_flow(session, control_hand, result_gray, gray)
     process_volume_scroll(
         session,
         control_hand=control_hand,
@@ -183,6 +185,7 @@ def process_mediapipe_packet(
         get_volume_cb=get_volume_cb,
         set_volume_cb=set_volume_cb,
     )
+    corrected = reanchor_flow(session, control_hand, result_gray, gray)
     sync_cursor_and_fallback(
         session,
         corrected=corrected,

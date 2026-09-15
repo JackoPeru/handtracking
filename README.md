@@ -2,9 +2,29 @@
 
 Applicazione Windows per controllare mouse e gesture tramite webcam, MediaPipe e optical flow OpenCV.
 
-Avvio: `Avvia Hand Tracking.bat`.
+Supporto: Windows x64 con CPython 3.12 x64. Avvio: `Avvia Hand Tracking.bat`.
 
-Al primo avvio il launcher crea automaticamente `.venv`, aggiorna `pip` e installa le dipendenze da `requirements.txt`. Il modello `hand_landmarker.task` e' incluso nel repository e viene risolto rispetto alla cartella del progetto, quindi l'app puo' essere avviata anche da una working directory diversa.
+Al primo avvio il launcher crea automaticamente `.venv` se manca e verifica che l'interprete sia CPython 3.12 x64. A ogni avvio riconcilia l'ambiente con `requirements.lock` usando `pip --require-hashes --only-binary=:all:` prima di eseguire l'applicazione; non esegue upgrade non bloccati di `pip` e non usa `requirements.txt` per l'installazione runtime. Il modello `hand_landmarker.task` e' incluso nel repository e viene risolto rispetto alla cartella del progetto, quindi l'app puo' essere avviata anche da una working directory diversa.
+
+Setup manuale equivalente:
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+.venv\Scripts\python.exe main.py
+```
+
+`requirements.txt` contiene solo le dipendenze dirette leggibili. `requirements.lock` e' il manifest operativo: blocca versioni e hash delle wheel verificate per Windows x64/CPython 3.12. Non aggirare il lock con installazioni non hashate o con sorgenti non binarie.
+
+Aggiornamento del lock:
+
+1. Aggiornare solo i pin diretti in `requirements.txt`.
+2. In un ambiente temporaneo Windows x64/CPython 3.12, scaricare la chiusura completa in una wheelhouse locale: `py -3.12 -m venv .lock-venv`, poi `.lock-venv\Scripts\python.exe -m pip download --only-binary=:all: --dest .lock-wheelhouse -r requirements.txt`.
+3. Calcolare l'hash di ogni wheel con `.lock-venv\Scripts\python.exe -m pip hash <wheel>` (in PowerShell si puo' iterare `Get-ChildItem .lock-wheelhouse\*.whl`). Per ogni archivio leggere `*.dist-info/METADATA` e riportare `Name` e `Version` esatti in `requirements.lock`, con il relativo `sha256` della wheel CPython 3.12 x64; verificare il diff, senza righe non versionate o prive di hash.
+4. Verificare il lock offline in una virtualenv pulita: `.lock-venv\Scripts\python.exe -m pip install --no-index --find-links .lock-wheelhouse --require-hashes --only-binary=:all: -r requirements.lock`, poi `.lock-venv\Scripts\python.exe -m pip check` e `.lock-venv\Scripts\python.exe -m unittest discover -s tests -v`.
+5. Dopo la verifica, rimuovere gli artefatti temporanei `.lock-venv` e `.lock-wheelhouse` senza includerli nel repository.
+
+Il launcher e la CI devono continuare a usare esclusivamente questo lock; modifiche alle dipendenze richiedono quindi aggiornamento coordinato di `requirements.txt`, `requirements.lock` e dei test di contratto.
 
 Struttura principale:
 

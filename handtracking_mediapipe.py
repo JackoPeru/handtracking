@@ -35,22 +35,6 @@ class MediaPipeWorker(threading.Thread):
             self._pending = (frame, gray, timestamp_ms, enqueued_at)
             self._pending_event.set()
 
-    def snapshot(self):
-        with self._lock:
-            return self._latest
-
-    def stats(self):
-        with self._lock:
-            return {
-                "seq": self._seq,
-                "input_seq": self._input_seq,
-                "overwrites": self._overwrites,
-                "error_count": self._error_count,
-                "last_error": self._last_error,
-                "last_success_at": self._last_success_at,
-                "last_result_input_at": self._last_result_input_at,
-            }
-
     def snapshot_state(self):
         """Return result and worker metadata from the same locked snapshot."""
         with self._lock:
@@ -65,14 +49,6 @@ class MediaPipeWorker(threading.Thread):
                 "last_result_input_at": self._last_result_input_at,
                 "alive": self.is_alive(),
             }
-
-    @property
-    def error_count(self):
-        return self.stats()["error_count"]
-
-    @property
-    def last_error(self):
-        return self.stats()["last_error"]
 
     def stop(self):
         self._stop_event.set()

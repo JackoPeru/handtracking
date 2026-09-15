@@ -62,6 +62,9 @@ def _run_impl(session):
         if not mp_state["alive"]:
             detail = mp_state["last_error"] or "unknown worker failure"
             raise RuntimeError(f"MediaPipe worker stopped: {detail}")
+        if not cursor.running:
+            detail = cursor.last_error or "unknown cursor worker failure"
+            raise RuntimeError(f"Cursor worker stopped: {detail}")
         session.mp_input_seq = mp_state["input_seq"]
         session.mp_overwrites = mp_state["overwrites"]
         session.mp_error_count = mp_state["error_count"]
@@ -121,7 +124,8 @@ def _run_impl(session):
         packet_new = packet is not None and packet[0] != session.latest_result_seq
         detect_frame = None
         gray = None
-        if submit_due or flow_due or packet_new:
+        if (submit_due or flow_due or
+                (packet_new and not mp_result_stale and session.commands_enabled)):
             preprocess_started = perf.now_ns()
             detect_frame, gray = camera.prepare_detection(frame)
             perf.observe_ns("preprocess", preprocess_started)
@@ -139,6 +143,23 @@ def _run_impl(session):
             )
             perf.observe_ns("flow", flow_started)
             commit_flow_measurement(flow, gray, flow_motion, now=now)
+        # LK measurement has no OS side effects; fresh safety state must be
+        # applied before dispatch consumes the measured motion.
+        mp_process_started = perf.now_ns()
+        frame_result = process_mediapipe_packet(
+            session,
+            packet,
+            gray=gray,
+            now=now,
+            camera_target_fps=session.camera_target_fps,
+            mp_result_stale=mp_result_stale,
+        )
+        if frame_result.processed:
+            perf.observe_ns("mp_process", mp_process_started)
+        if frame_result.skip_frame:
+            perf.observe_ns("loop", loop_started)
+            continue
+
         if flow_motion is not None:
             flow_result = dispatch_flow_motion(
                 motion_dx=flow_motion.dx,
@@ -173,20 +194,6 @@ def _run_impl(session):
             session.precision_snap_active = flow_result.precision_snap_active
             session.snap_anchor = flow_result.snap_anchor
             session.snap_started_at = flow_result.snap_started_at
-
-        mp_process_started = perf.now_ns()
-        frame_result = process_mediapipe_packet(
-            session,
-            packet,
-            gray=gray,
-            now=now,
-            camera_target_fps=session.camera_target_fps,
-        )
-        if frame_result.processed:
-            perf.observe_ns("mp_process", mp_process_started)
-        if frame_result.skip_frame:
-            perf.observe_ns("loop", loop_started)
-            continue
 
         expire_lost_flow(flow, now=now)
 

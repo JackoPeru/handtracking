@@ -15,13 +15,6 @@ from handtracking_config import (
 from handtracking_core import choose_camera_target_fps
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedFrame:
-    frame: object
-    detect_frame: object
-    gray: object
-
-
 @dataclass(slots=True)
 class CameraRuntime:
     capture: object
@@ -35,57 +28,71 @@ class CameraRuntime:
 
     @classmethod
     def open(cls, *, cv2_module=cv2):
-        cap = cv2_module.VideoCapture(0, cv2_module.CAP_MSMF)
-        if not cap.isOpened():
-            cap.release()
-            cap = cv2_module.VideoCapture(0)
-        if not cap.isOpened():
-            raise RuntimeError("Impossibile aprire la webcam")
+        cap = None
+        window_created = False
+        try:
+            cap = cv2_module.VideoCapture(0, cv2_module.CAP_MSMF)
+            if not cap.isOpened():
+                failed_cap = cap
+                cap = None
+                try:
+                    failed_cap.release()
+                except Exception:
+                    pass
+                cap = cv2_module.VideoCapture(0)
+            if not cap.isOpened():
+                raise RuntimeError("Impossibile aprire la webcam")
 
-        cap.set(
-            cv2_module.CAP_PROP_FOURCC,
-            cv2_module.VideoWriter_fourcc(*"MJPG"),
-        )
-        cap.set(cv2_module.CAP_PROP_FRAME_WIDTH, CAMERA_W)
-        cap.set(cv2_module.CAP_PROP_FRAME_HEIGHT, CAMERA_H)
-        cap.set(cv2_module.CAP_PROP_FPS, TARGET_FPS)
-        cap.set(cv2_module.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(
+                cv2_module.CAP_PROP_FOURCC,
+                cv2_module.VideoWriter_fourcc(*"MJPG"),
+            )
+            cap.set(cv2_module.CAP_PROP_FRAME_WIDTH, CAMERA_W)
+            cap.set(cv2_module.CAP_PROP_FRAME_HEIGHT, CAMERA_H)
+            cap.set(cv2_module.CAP_PROP_FPS, TARGET_FPS)
+            cap.set(cv2_module.CAP_PROP_BUFFERSIZE, 1)
 
-        reported_fps = float(cap.get(cv2_module.CAP_PROP_FPS))
-        reported_w = int(round(cap.get(cv2_module.CAP_PROP_FRAME_WIDTH)))
-        reported_h = int(round(cap.get(cv2_module.CAP_PROP_FRAME_HEIGHT)))
-        reported_fourcc = int(cap.get(cv2_module.CAP_PROP_FOURCC))
-        codec = "".join(
-            chr((reported_fourcc >> (8 * i)) & 0xFF) for i in range(4)
-        ).replace("\x00", "") or "?"
-        target_fps = choose_camera_target_fps(
-            reported_fps,
-            TARGET_FPS,
-            FALLBACK_FPS,
-        )
+            reported_fps = float(cap.get(cv2_module.CAP_PROP_FPS))
+            reported_w = int(round(cap.get(cv2_module.CAP_PROP_FRAME_WIDTH)))
+            reported_h = int(round(cap.get(cv2_module.CAP_PROP_FRAME_HEIGHT)))
+            reported_fourcc = int(cap.get(cv2_module.CAP_PROP_FOURCC))
+            codec = "".join(
+                chr((reported_fourcc >> (8 * i)) & 0xFF) for i in range(4)
+            ).replace("\x00", "") or "?"
+            target_fps = choose_camera_target_fps(
+                reported_fps,
+                TARGET_FPS,
+                FALLBACK_FPS,
+            )
 
-        cv2_module.namedWindow("Hands", cv2_module.WINDOW_NORMAL)
-        cv2_module.setWindowProperty(
-            "Hands",
-            cv2_module.WND_PROP_FULLSCREEN,
-            cv2_module.WINDOW_FULLSCREEN,
-        )
-        return cls(
-            capture=cap,
-            reported_fps=reported_fps,
-            reported_w=reported_w,
-            reported_h=reported_h,
-            codec=codec,
-            target_fps=target_fps,
-            cv2_module=cv2_module,
-        )
-
-    def read_prepared(self):
-        frame = self.read_frame()
-        if frame is None:
-            return None
-        detect_frame, gray = self.prepare_detection(frame)
-        return PreparedFrame(frame, detect_frame, gray)
+            window_created = True
+            cv2_module.namedWindow("Hands", cv2_module.WINDOW_NORMAL)
+            cv2_module.setWindowProperty(
+                "Hands",
+                cv2_module.WND_PROP_FULLSCREEN,
+                cv2_module.WINDOW_FULLSCREEN,
+            )
+            return cls(
+                capture=cap,
+                reported_fps=reported_fps,
+                reported_w=reported_w,
+                reported_h=reported_h,
+                codec=codec,
+                target_fps=target_fps,
+                cv2_module=cv2_module,
+            )
+        except BaseException:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            if window_created:
+                try:
+                    cv2_module.destroyAllWindows()
+                except Exception:
+                    pass
+            raise
 
     def read_frame(self):
         ok, frame = self.capture.read()
