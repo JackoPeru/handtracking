@@ -13,6 +13,7 @@ from handtracking_config import HUD_REFRESH_HZ
 from handtracking_display import OverlayLayer
 from handtracking_mediapipe import MediaPipeWorker
 from handtracking_perf import MediaPipeSubmitScheduler, PerfProfiler
+from handtracking_settings import RuntimeSettings
 from handtracking_state import (
     FlowState,
     PointerState,
@@ -133,10 +134,13 @@ class RuntimeSession:
     mp_error_count: int = 0
     mp_last_error: str = ""
     camera_target_fps: int = 0
+    settings: RuntimeSettings = field(default_factory=RuntimeSettings)
+    render_enabled: bool = True
+    trace: object | None = None
     perf: PerfProfiler = field(default_factory=PerfProfiler)
     mp_scheduler: MediaPipeSubmitScheduler = field(default_factory=MediaPipeSubmitScheduler)
     hud_layer: OverlayLayer = field(
-        default_factory=lambda: OverlayLayer(HUD_REFRESH_HZ, height=370)
+        default_factory=lambda: OverlayLayer(HUD_REFRESH_HZ, height=420)
     )
     _closed: bool = False
 
@@ -152,6 +156,7 @@ class RuntimeSession:
         image_builder=build_mediapipe_image,
         get_volume=get_system_volume,
         time_fn=time.perf_counter,
+        settings=None,
     ):
         worker = None
         cursor = None
@@ -179,6 +184,7 @@ class RuntimeSession:
                 fps_window_start=now,
                 mp_fps_window_start=now,
                 camera_target_fps=int(getattr(camera, "target_fps", 0)),
+                settings=settings if settings is not None else RuntimeSettings(),
             )
         except Exception:
             _close_resources(worker, cursor, camera)
@@ -188,4 +194,8 @@ class RuntimeSession:
         if self._closed:
             return
         self._closed = True
-        _close_resources(self.worker, self.cursor, self.camera)
+        try:
+            _close_resources(self.worker, self.cursor, self.camera)
+        finally:
+            if self.trace:
+                self.trace.close()

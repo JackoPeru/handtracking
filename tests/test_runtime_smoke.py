@@ -92,6 +92,19 @@ class FakeCursor:
         self._position = (100, 100)
         self.running = True
         self.last_error = ""
+        self.renewals = []
+        self.input_times = []
+
+    def renew_freshness(self, input_at):
+        self.renewals.append(input_at)
+        return True
+
+    def set_input_time(self, input_at):
+        self.input_times.append(input_at)
+
+    def output_latency(self):
+        from handtracking_perf import ZERO_METRIC
+        return ZERO_METRIC
 
     @property
     def active(self):
@@ -154,6 +167,7 @@ class PacketWorker:
     def __init__(self, packets, *, stale=False):
         self.packets = list(packets)
         self.stale = stale
+        self.result_input_at = time.perf_counter() - (1.0 if stale else 0.0)
         self.index = 0
         self.stopped = False
         self.joined = False
@@ -174,7 +188,6 @@ class PacketWorker:
     def snapshot_state(self):
         packet = self.packets[min(self.index, len(self.packets) - 1)]
         self.index += 1
-        result_input_at = time.perf_counter() - (1.0 if self.stale else 0.0)
         return {
             "latest": packet,
             "seq": packet[0] if packet is not None else 0,
@@ -183,7 +196,7 @@ class PacketWorker:
             "error_count": self.error_count,
             "last_error": self.last_error,
             "last_success_at": time.perf_counter(),
-            "last_result_input_at": result_input_at,
+            "last_result_input_at": self.result_input_at,
             "alive": self.is_alive(),
         }
 
@@ -203,11 +216,25 @@ class NullHud:
 
 
 class RuntimeSmokeTests(unittest.TestCase):
+    def test_record_creation_failure_releases_the_live_session(self):
+        import handtracking_runtime as runtime
+        camera, worker, cursor = FakeRuntimeCamera(), FakeWorker(), FakeCursor()
+        create = self._session_create_side_effect(runtime, worker, cursor)
+        with mock.patch.object(runtime.CameraRuntime, "open", return_value=camera), \
+                mock.patch.object(runtime.RuntimeSession, "create", side_effect=create), \
+                mock.patch("handtracking_trace.TraceRecorder", side_effect=OSError("disk failure")):
+            with self.assertRaisesRegex(OSError, "disk failure"):
+                runtime.run(record_path="not-written.jsonl")
+        self.assertTrue(camera.closed)
+        self.assertTrue(worker.stopped)
+        self.assertTrue(worker.joined)
+        self.assertTrue(cursor.closed)
+
     @staticmethod
     def _session_create_side_effect(runtime, worker, cursor):
         real_create = runtime.RuntimeSession.create
 
-        def create(*, camera):
+        def create(*, camera, settings=None):
             return real_create(
                 camera=camera,
                 worker_cls=lambda **kwargs: worker,
@@ -216,6 +243,7 @@ class RuntimeSmokeTests(unittest.TestCase):
                 options=object(),
                 image_builder=lambda frame: frame,
                 get_volume=lambda: 0.5,
+                settings=settings,
             )
 
         return create
@@ -225,6 +253,9 @@ class RuntimeSmokeTests(unittest.TestCase):
         from handtracking_session import RuntimeSession
 
         now = time.perf_counter()
+        if isinstance(worker, PacketWorker) and not worker.stale:
+            # Seed the simulated result after cold imports, before frame ready.
+            worker.result_input_at = now
         session = RuntimeSession(
             camera=camera,
             worker=worker,
@@ -243,7 +274,7 @@ class RuntimeSmokeTests(unittest.TestCase):
 
     @staticmethod
     def _run_runtime_session(session, *, motion=None, execute_swipe=None,
-                             mouse_wheel=None):
+                             mouse_wheel=None, runtime_kwargs=None):
         import handtracking_runtime as runtime
 
         patches = [
@@ -264,7 +295,7 @@ class RuntimeSmokeTests(unittest.TestCase):
             for patcher in patches:
                 patcher.start()
             try:
-                return runtime._run_impl(session)
+                return runtime._run_impl(session, **(runtime_kwargs or {}))
             finally:
                 for patcher in reversed(patches):
                     patcher.stop()
@@ -279,6 +310,143 @@ class RuntimeSmokeTests(unittest.TestCase):
             handedness=[],
         )
         return (seq, result, object(), 1.0, 1.0, 16.0, 0.0)
+
+    @staticmethod
+    def _pinch_packet(seq):
+        coords = ((.5,.85),(.4,.7),(.42,.68),(.45,.64),(.48,.6),
+                  (.4,.55),(.4,.4),(.45,.45),(.48,.6),(.5,.55),
+                  (.5,.4),(.5,.3),(.5,.2),(.6,.55),(.6,.4),(.6,.3),
+                  (.6,.2),(.7,.55),(.7,.4),(.7,.3),(.7,.2))
+        hand = [SimpleNamespace(x=x, y=y, z=0.0) for x, y in coords]
+        result = SimpleNamespace(
+            hand_landmarks=[hand], hand_world_landmarks=[],
+            handedness=[[SimpleNamespace(category_name="Left")]],
+        )
+        return (seq, result, object(), 1.0, 1.0, 16.0, 0.0)
+
+    def test_pointer_has_one_motion_source_when_lk_alignment_fails(self):
+        from handtracking_flow import LKMotion
+
+        class CountingCursor(FakeCursor):
+            def __init__(self):
+                super().__init__()
+                self.moves = []
+            def add_delta(self, dx, dy, **kwargs):
+                self.moves.append((dx, dy))
+                super().add_delta(dx, dy, **kwargs)
+
+        camera = FakeRuntimeCamera()
+        cursor = CountingCursor()
+        session = self._make_runtime_session(
+            camera, PacketWorker([self._pinch_packet(1)]), cursor,
+        )
+        session.pointer.pinch_held = session.pointer.move_active = True
+        session.mp_control_ref = (.539, .604)
+        session.flow.prev_gray = camera.gray
+        session.flow.points = np.zeros((5, 1, 2), dtype=np.float32)
+        session.flow.active = True
+        session.flow.time = time.perf_counter() - .05
+        cursor.sync(True)
+        motion = LKMotion(session.flow.points, 1.28, 0.0, 1.28)
+        with mock.patch("handtracking_flow.cv2.calcOpticalFlowPyrLK",
+                        return_value=(None, None, None)):
+            self._run_runtime_session(session, motion=motion)
+        self.assertEqual(len(cursor.moves), 1)
+
+    def test_runtime_renews_cursor_only_from_fresh_mediapipe_input_time(self):
+        for age in (.05, 1.0):
+            with self.subTest(age=age):
+                input_at = time.perf_counter() - age
+                class FixedWorker(PacketWorker):
+                    def snapshot_state(self):
+                        state = super().snapshot_state()
+                        state["last_result_input_at"] = input_at
+                        return state
+                cursor = FakeCursor()
+                session = self._make_runtime_session(
+                    FakeRuntimeCamera(), FixedWorker([self._packet(1)]), cursor,
+                )
+                self._run_runtime_session(session)
+                self.assertEqual(cursor.renewals, [input_at] if age == .05 else [])
+
+    def test_pointer_falls_back_when_both_lk_measurement_and_alignment_fail(self):
+        camera, cursor = FakeRuntimeCamera(), FakeCursor()
+        session = self._make_runtime_session(
+            camera, PacketWorker([self._pinch_packet(1)]), cursor,
+        )
+        session.pointer.pinch_held = session.pointer.move_active = True
+        session.mp_control_ref = (.539, .604)
+        session.flow.prev_gray = camera.gray
+        session.flow.points = np.zeros((5, 1, 2), dtype=np.float32)
+        cursor.sync(True)
+        with mock.patch("handtracking_flow.cv2.calcOpticalFlowPyrLK",
+                        return_value=(None, None, None)):
+            self._run_runtime_session(session)
+        self.assertGreater(cursor.position()[0], 100)
+
+    def test_invalid_freshness_cannot_arm_a_real_pinch_packet(self):
+        for invalid in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(input_at=invalid):
+                class InvalidWorker(PacketWorker):
+                    def snapshot_state(self):
+                        state = super().snapshot_state()
+                        state["last_result_input_at"] = invalid
+                        return state
+                cursor = FakeCursor()
+                session = self._make_runtime_session(
+                    FakeRuntimeCamera(), InvalidWorker([self._pinch_packet(1)]), cursor,
+                )
+                self._run_runtime_session(session)
+                self.assertFalse(session.pointer.pinch_held)
+                self.assertFalse(cursor.active)
+                self.assertEqual(cursor.renewals, [])
+                self.assertEqual(session.latest_result_seq, -1)
+
+    def test_lease_rejected_after_frame_ready_disables_gesture_output(self):
+        class ExpiredCursor(FakeCursor):
+            def renew_freshness(self, input_at):
+                return False
+        cursor = ExpiredCursor()
+        session = self._make_runtime_session(
+            FakeRuntimeCamera(), PacketWorker([self._pinch_packet(1)]), cursor,
+        )
+        with mock.patch("handtracking_flow.cv2.calcOpticalFlowPyrLK",
+                        return_value=(None, None, None)):
+            self._run_runtime_session(session)
+        self.assertFalse(session.pointer.pinch_held)
+        self.assertFalse(cursor.active)
+        self.assertEqual(session.latest_result_seq, -1)
+
+    def test_runtime_headless_mode_never_opens_display(self):
+        camera = FakeRuntimeCamera()
+        camera.show = lambda frame: self.fail("headless runtime must not display")
+        session = self._make_runtime_session(
+            camera, PacketWorker([self._packet(1)]), FakeCursor(),
+        )
+        session.render_enabled = False
+        self._run_runtime_session(session)
+
+    def test_runtime_replay_callbacks_receive_the_controlled_clock(self):
+        from handtracking_frame import FrameProcessResult
+        class FixedWorker(PacketWorker):
+            def snapshot_state(self):
+                state = super().snapshot_state()
+                state["last_result_input_at"] = 122.99
+                return state
+        session = self._make_runtime_session(
+            FakeRuntimeCamera(), FixedWorker([self._packet(1)]), FakeCursor(),
+        )
+        session.start_time = session.fps_window_start = session.mp_fps_window_start = 122.0
+        def processor(session, packet, **kwargs):
+            session.gesture_event = "CLOCK " + str(kwargs["now"])
+            return FrameProcessResult(True)
+        try:
+            self._run_runtime_session(session, runtime_kwargs={
+                "now_fn": lambda: 123.0, "process_packet_fn": processor,
+            })
+        except TypeError as exc:
+            self.fail("replay runtime callbacks are unavailable: " + str(exc))
+        self.assertEqual(session.gesture_event, "CLOCK 123.0")
 
     def test_runtime_does_not_replay_stale_packet_after_fail_safe(self):
         camera = FakeRuntimeCamera()

@@ -1,6 +1,11 @@
 import unittest
+from unittest import mock
 
 import numpy as np
+
+from benchmarks.hotpath_benchmark import _hud_kwargs
+from handtracking_hud import draw_runtime_hud
+from handtracking_perf import PerfMetric
 
 
 class HudTests(unittest.TestCase):
@@ -21,8 +26,6 @@ class HudTests(unittest.TestCase):
         ))
 
     def test_draw_runtime_hud_writes_pixels_without_mutating_metrics(self):
-        from handtracking_hud import draw_runtime_hud
-
         frame = np.zeros((360, 640, 3), dtype=np.uint8)
         metrics = dict(
             actual_fps=60.0,
@@ -60,7 +63,6 @@ class HudTests(unittest.TestCase):
             perf_loop_ms=2.1,
         )
         before = metrics.copy()
-
         draw_runtime_hud(
             frame,
             gesture_mode="MOUSE",
@@ -76,9 +78,25 @@ class HudTests(unittest.TestCase):
             radial_selected=None,
             **metrics,
         )
-
         self.assertGreater(int(frame.sum()), 0)
         self.assertEqual(metrics, before)
+
+    def test_hud_distinguishes_loop_from_first_os_send_latency(self):
+        frame = np.zeros((410, 1280, 3), dtype=np.uint8)
+        loop = PerfMetric(100, 8, 7, 6, 9, 12)
+        output = PerfMetric(10, 5, 4, 3, 7, 10)
+        with mock.patch("handtracking_hud.cv2.putText") as text:
+            try:
+                draw_runtime_hud(frame, **_hud_kwargs(), loop_metric=loop,
+                                 cursor_metric=output, profile="precisione")
+            except TypeError as exc:
+                self.fail("HUD percentiles unavailable: " + str(exc))
+        labels = [call.args[1] for call in text.call_args_list]
+        percentile_rows = [label for label in labels if "p50/95/99" in label]
+        self.assertEqual(len(percentile_rows), 2)
+        self.assertIn("6.00/9.00/12.00", percentile_rows[0])
+        self.assertIn("3.00/7.00/10.00", percentile_rows[1])
+        self.assertTrue(any("precisione" in label for label in labels))
 
 
 if __name__ == "__main__":

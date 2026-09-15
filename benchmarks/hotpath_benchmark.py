@@ -21,6 +21,7 @@ from handtracking_gestures import (
     spock_pose_score,
 )
 from handtracking_hud import draw_runtime_hud
+from handtracking_perf import PerfMetric, PerfProfiler
 from handtracking_render import draw_runtime_overlays
 
 
@@ -125,6 +126,11 @@ def run_benchmarks(*, iterations=20_000, lk_iterations=300, render_iterations=60
     preprocess_seconds = _average_seconds(preprocess, render_iterations)
 
     hud_kwargs = _hud_kwargs()
+    hud_kwargs.update(
+        loop_metric=PerfMetric(256, 2, 2, 1, 3, 4),
+        cursor_metric=PerfMetric(256, 4, 4, 2, 6, 8),
+        profile="standard",
+    )
 
     def direct_hud():
         frame = full_frame.copy()
@@ -132,7 +138,7 @@ def run_benchmarks(*, iterations=20_000, lk_iterations=300, render_iterations=60
 
     direct_hud_seconds = _average_seconds(direct_hud, render_iterations)
 
-    layer = OverlayLayer(refresh_hz=12.0, height=370)
+    layer = OverlayLayer(refresh_hz=12.0, height=420)
     now = 0.0
 
     def cached_hud():
@@ -198,6 +204,14 @@ def run_benchmarks(*, iterations=20_000, lk_iterations=300, render_iterations=60
 
     cached_overlay_seconds = _average_seconds(cached_overlay, render_iterations)
 
+    profiler = PerfProfiler()
+    for sample in range(256):
+        profiler.observe_ms("loop", sample / 100.0)
+    observe_seconds = _average_seconds(
+        lambda: profiler.observe_ms("loop", 1.0), iterations,
+    )
+    metric_seconds = _average_seconds(lambda: profiler.metric("loop"), iterations)
+
     return {
         "geometry_raw_us": raw_seconds * 1_000_000.0,
         "geometry_cached_us": cached_seconds * 1_000_000.0,
@@ -207,6 +221,8 @@ def run_benchmarks(*, iterations=20_000, lk_iterations=300, render_iterations=60
         "hud_cached_ms": cached_hud_seconds * 1_000.0,
         "overlay_direct_ms": direct_overlay_seconds * 1_000.0,
         "overlay_cached_ms": cached_overlay_seconds * 1_000.0,
+        "profiler_observe_us": observe_seconds * 1_000_000.0,
+        "profiler_metric_us": metric_seconds * 1_000_000.0,
     }
 
 

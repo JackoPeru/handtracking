@@ -77,6 +77,9 @@ def draw_runtime_hud(
     perf_mp_process_ms=0.0,
     perf_render_ms=0.0,
     perf_loop_ms=0.0,
+    loop_metric=None,
+    cursor_metric=None,
+    profile="standard",
 ):
     status = build_status_text(
         gesture_mode,
@@ -142,6 +145,21 @@ def draw_runtime_hud(
             f"MP ERR {mp_error_count}: {mp_last_error}",
             (30, 348), cv2.FONT_HERSHEY_SIMPLEX,
             0.50, (0, 80, 255), 2, cv2.LINE_AA,
+        )
+
+    if loop_metric is not None:
+        cv2.putText(
+            frame,
+            f"Loop p50/95/99 {loop_metric.p50_ms:.2f}/{loop_metric.p95_ms:.2f}/{loop_metric.p99_ms:.2f} ms | profilo {profile}",
+            (30, 375), cv2.FONT_HERSHEY_SIMPLEX,
+            0.50, (180, 220, 255), 1, cv2.LINE_AA,
+        )
+    if cursor_metric is not None:
+        cv2.putText(
+            frame,
+            f"Frame->OS p50/95/99 {cursor_metric.p50_ms:.2f}/{cursor_metric.p95_ms:.2f}/{cursor_metric.p99_ms:.2f} ms | n {cursor_metric.samples}",
+            (30, 402), cv2.FONT_HERSHEY_SIMPLEX,
+            0.50, (180, 220, 255), 1, cv2.LINE_AA,
         )
 
     frame_w = frame.shape[1]

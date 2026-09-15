@@ -27,11 +27,11 @@ class CameraRuntime:
     _closed: bool = False
 
     @classmethod
-    def open(cls, *, cv2_module=cv2):
+    def open(cls, *, camera_index=0, cv2_module=cv2):
         cap = None
         window_created = False
         try:
-            cap = cv2_module.VideoCapture(0, cv2_module.CAP_MSMF)
+            cap = cv2_module.VideoCapture(camera_index, cv2_module.CAP_MSMF)
             if not cap.isOpened():
                 failed_cap = cap
                 cap = None
@@ -39,7 +39,7 @@ class CameraRuntime:
                     failed_cap.release()
                 except Exception:
                     pass
-                cap = cv2_module.VideoCapture(0)
+                cap = cv2_module.VideoCapture(camera_index)
             if not cap.isOpened():
                 raise RuntimeError("Impossibile aprire la webcam")
 

@@ -24,6 +24,34 @@ class PerfProfilerTests(unittest.TestCase):
         self.assertEqual(metric.last_ms, 0.0)
         self.assertEqual(metric.ema_ms, 0.0)
 
+    def test_profiler_reports_nearest_rank_percentiles_from_bounded_history(self):
+        from handtracking_perf import PerfProfiler
+
+        profiler = PerfProfiler()
+        for value in range(1, 257):
+            profiler.observe_ms("flow", value)
+
+        metric = profiler.metric("flow")
+        self.assertEqual(metric.samples, 256)
+        self.assertEqual(metric.p50_ms, 128.0)
+        self.assertEqual(metric.p95_ms, 244.0)
+        self.assertEqual(metric.p99_ms, 254.0)
+
+    def test_profiler_percentiles_drop_old_outliers_and_keep_history_bounded(self):
+        from handtracking_perf import PerfProfiler
+
+        profiler = PerfProfiler()
+        profiler.observe_ms("flow", 10_000.0)
+        for _ in range(256):
+            profiler.observe_ms("flow", 1.0)
+
+        metric = profiler.metric("flow")
+        self.assertEqual(metric.samples, 257)
+        self.assertEqual(metric.p50_ms, 1.0)
+        self.assertEqual(metric.p95_ms, 1.0)
+        self.assertEqual(metric.p99_ms, 1.0)
+        self.assertLessEqual(len(profiler._histories["flow"]), 256)
+
     def test_hot_result_objects_are_slotted(self):
         from handtracking_flow import FlowDispatchResult, LKMotion
         from handtracking_frame import FrameProcessResult

@@ -74,6 +74,30 @@ class CameraRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.reported_w, 1280)
         self.assertEqual(runtime.reported_h, 720)
 
+    def test_open_uses_selected_camera_index_for_both_backends(self):
+        import handtracking_camera as camera
+
+        first = FakeCapture(opened=False)
+        second = FakeCapture(opened=True)
+        second.props = {
+            camera.cv2.CAP_PROP_FPS: 60.0,
+            camera.cv2.CAP_PROP_FRAME_WIDTH: 1280.0,
+            camera.cv2.CAP_PROP_FRAME_HEIGHT: 720.0,
+            camera.cv2.CAP_PROP_FOURCC: camera.cv2.VideoWriter_fourcc(*"MJPG"),
+        }
+        fake_cv2 = mock.Mock(wraps=camera.cv2)
+        fake_cv2.VideoCapture.side_effect = [first, second]
+        fake_cv2.namedWindow = mock.Mock()
+        fake_cv2.setWindowProperty = mock.Mock()
+
+        runtime = camera.CameraRuntime.open(camera_index=7, cv2_module=fake_cv2)
+
+        self.assertIs(runtime.capture, second)
+        fake_cv2.VideoCapture.assert_has_calls([
+            mock.call(7, fake_cv2.CAP_MSMF),
+            mock.call(7),
+        ])
+
     def test_open_releases_failed_fallback_capture(self):
         import handtracking_camera as camera
 

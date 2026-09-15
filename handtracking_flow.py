@@ -175,7 +175,7 @@ def dispatch_flow_motion(*, motion_dx, motion_dy, motion_mag, now,
                          pointer, volume, two_hand, radial, scroll, swipe, flow,
                          cursor, screen_w, screen_h, precision_snap_active,
                          snap_anchor, snap_started_at, execute_swipe_cb,
-                         mouse_wheel_cb):
+                         mouse_wheel_cb, move_gain=MOVE_GAIN):
     gesture_event = None
     gesture_event_until = None
 
@@ -312,9 +312,9 @@ def dispatch_flow_motion(*, motion_dx, motion_dy, motion_mag, now,
                         out_x *= ramp
                         out_y *= ramp
                     dynamic_gain = cursor_gain_for_speed(speed)
-                    dx = (out_x / DETECTION_W * screen_w * MOVE_GAIN *
+                    dx = (out_x / DETECTION_W * screen_w * move_gain *
                           MOVEMENT_MULTIPLIER * dynamic_gain)
-                    dy = (out_y / DETECTION_H * screen_h * MOVE_GAIN *
+                    dy = (out_y / DETECTION_H * screen_h * move_gain *
                           MOVEMENT_MULTIPLIER * dynamic_gain)
                     screen_step = math.hypot(float(dx), float(dy))
                     if precision_snap_active:

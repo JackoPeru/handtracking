@@ -147,6 +147,9 @@ def process_pointer(
         snap_anchor=session.snap_anchor,
         snap_started_at=session.snap_started_at,
         left_click_cb=left_click_cb,
+        pinch_on=session.settings.pinch_on,
+        pinch_off=session.settings.pinch_off,
+        pinch_release_brake=session.settings.pinch_release_brake,
     )
     if result.event is not None:
         session.gesture_event = result.event
@@ -251,7 +254,8 @@ def process_volume_scroll(
     )
 
 
-def sync_cursor_and_fallback(session, *, corrected, old_mp_ref, old_pause, now):
+def sync_cursor_and_fallback(session, *, corrected, old_mp_ref, old_pause, now,
+                             allow_fallback=True):
     if session.paused_by_fist or not session.commands_enabled or session.spock.blocking:
         session.cursor.sync(False)
         session.flow.clear_motion()
@@ -271,7 +275,7 @@ def sync_cursor_and_fallback(session, *, corrected, old_mp_ref, old_pause, now):
         session.cursor.sync(False)
 
     if not (
-        session.pointer.pinch_held and session.pointer.move_active and
+        allow_fallback and session.pointer.pinch_held and session.pointer.move_active and
         not exclusive_cursor_block and corrected is None and
         old_mp_ref is not None and session.mp_control_ref is not None and
         not old_pause and now >= session.gesture_input_block_until
@@ -292,8 +296,8 @@ def sync_cursor_and_fallback(session, *, corrected, old_mp_ref, old_pause, now):
     )
     fallback_speed = fmag * max(DETECTION_W, DETECTION_H) / fallback_dt
     dynamic_gain = cursor_gain_for_speed(fallback_speed)
-    dx = fdx * session.screen_w * MOVE_GAIN * MOVEMENT_MULTIPLIER * dynamic_gain
-    dy = fdy * session.screen_h * MOVE_GAIN * MOVEMENT_MULTIPLIER * dynamic_gain
+    dx = fdx * session.screen_w * session.settings.move_gain * MOVEMENT_MULTIPLIER * dynamic_gain
+    dy = fdy * session.screen_h * session.settings.move_gain * MOVEMENT_MULTIPLIER * dynamic_gain
     screen_step = math.hypot(float(dx), float(dy))
     if session.precision_snap_active:
         if screen_step <= SNAP_BREAK_DELTA_PX:

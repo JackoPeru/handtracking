@@ -15,6 +15,8 @@ class HotpathBenchmarkTests(unittest.TestCase):
             "hud_cached_ms",
             "overlay_direct_ms",
             "overlay_cached_ms",
+            "profiler_observe_us",
+            "profiler_metric_us",
         ):
             with self.subTest(key=key):
                 self.assertIn(key, results)

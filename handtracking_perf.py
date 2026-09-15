@@ -1,7 +1,12 @@
 """Low-overhead runtime performance counters."""
 
+from collections import deque
 from dataclasses import dataclass
+import math
 import time
+
+
+PERF_HISTORY_SIZE = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -9,17 +14,42 @@ class PerfMetric:
     samples: int = 0
     last_ms: float = 0.0
     ema_ms: float = 0.0
+    p50_ms: float = 0.0
+    p95_ms: float = 0.0
+    p99_ms: float = 0.0
 
 
 ZERO_METRIC = PerfMetric()
 
 
+def percentile_metric(values):
+    """Return nearest-rank p50/p95/p99 from finite values."""
+    finite = []
+    for value in values:
+        try:
+            value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(value):
+            finite.append(value)
+    ordered = sorted(finite)
+    if not ordered:
+        return (0.0, 0.0, 0.0)
+
+    def nearest_rank(fraction):
+        rank = max(1, math.ceil(fraction * len(ordered)))
+        return ordered[rank - 1]
+
+    return tuple(nearest_rank(fraction) for fraction in (0.50, 0.95, 0.99))
+
+
 class PerfProfiler:
-    __slots__ = ("alpha", "_metrics")
+    __slots__ = ("alpha", "_metrics", "_histories")
 
     def __init__(self, *, alpha=0.12):
         self.alpha = float(alpha)
         self._metrics = {}
+        self._histories = {}
 
     @staticmethod
     def now_ns():
@@ -31,7 +61,12 @@ class PerfProfiler:
         self.observe_ms(name, (ended_ns - started_ns) / 1_000_000.0)
 
     def observe_ms(self, name, value_ms):
-        value_ms = float(value_ms)
+        try:
+            value_ms = float(value_ms)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(value_ms):
+            return False
         previous = self._metrics.get(name)
         if previous is None:
             metric = PerfMetric(1, value_ms, value_ms)
@@ -42,9 +77,25 @@ class PerfProfiler:
                 previous.ema_ms * (1.0 - self.alpha) + value_ms * self.alpha,
             )
         self._metrics[name] = metric
+        history = self._histories.get(name)
+        if history is None:
+            history = deque(maxlen=PERF_HISTORY_SIZE)
+            self._histories[name] = history
+        history.append(value_ms)
+        return True
 
     def metric(self, name):
-        return self._metrics.get(name, ZERO_METRIC)
+        metric = self._metrics.get(name)
+        if metric is None:
+            return ZERO_METRIC
+        history = tuple(self._histories.get(name, ()))
+        if not history:
+            return metric
+        p50_ms, p95_ms, p99_ms = percentile_metric(history)
+        return PerfMetric(
+            metric.samples, metric.last_ms, metric.ema_ms,
+            p50_ms, p95_ms, p99_ms,
+        )
 
 
 class MediaPipeSubmitScheduler:

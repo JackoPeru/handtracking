@@ -50,6 +50,8 @@ def process_mediapipe_packet(
     now,
     camera_target_fps,
     mp_result_stale=False,
+    allow_pointer_fallback=True,
+    reanchor_cb=None,
     ctrl_wheel_cb=ctrl_wheel,
     execute_radial_action_cb=execute_radial_action,
     left_click_cb=left_click,
@@ -185,13 +187,14 @@ def process_mediapipe_packet(
         get_volume_cb=get_volume_cb,
         set_volume_cb=set_volume_cb,
     )
-    corrected = reanchor_flow(session, control_hand, result_gray, gray)
+    corrected = (reanchor_cb or reanchor_flow)(session, control_hand, result_gray, gray)
     sync_cursor_and_fallback(
         session,
         corrected=corrected,
         old_mp_ref=old_mp_ref,
         old_pause=old_pause,
         now=now,
+        allow_fallback=allow_pointer_fallback,
     )
     return FrameProcessResult(True)
 

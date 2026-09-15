@@ -58,6 +58,9 @@ def update_pointer_state(
     fingers_valid_fn=pointer_other_fingers_valid,
     pose_fn=is_pointer_pinch_pose,
     allowed_fn=pointer_mode_allowed,
+    pinch_on=POINTER_PINCH_ON,
+    pinch_off=POINTER_PINCH_OFF,
+    pinch_release_brake=POINTER_RELEASE_BRAKE_RATIO,
 ):
     event = None
     event_until = None
@@ -77,13 +80,13 @@ def update_pointer_state(
     )
     pointer_ratio = ratio_fn(control_hand, 8)
     pointer_fingers_valid = fingers_valid_fn(control_hand)
-    pointer_pose_on = pose_fn(control_hand, POINTER_PINCH_ON)
+    pointer_pose_on = pose_fn(control_hand, pinch_on)
 
     if pointer.pinch_held:
         if not pointer_allowed or not pointer_fingers_valid:
             pointer.reset(preserve_last_click=True)
             cursor.sync(False)
-        elif pointer_ratio > POINTER_PINCH_OFF:
+        elif pointer_ratio > pinch_off:
             pointer.release_braking = True
             pointer.move_active = False
             cursor.sync(False)
@@ -120,7 +123,7 @@ def update_pointer_state(
                 snap_started_at = None
                 cursor.sync(False)
                 flow.clear_motion()
-        elif pointer_ratio > POINTER_RELEASE_BRAKE_RATIO:
+        elif pointer_ratio > pinch_release_brake:
             pointer.release_braking = True
             pointer.move_active = False
             pointer.release_at = None

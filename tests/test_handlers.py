@@ -236,6 +236,99 @@ class HandlerTests(unittest.TestCase):
         self.assertTrue(pointer.pinch_held)
         self.assertEqual(pointer.cursor_origin, cursor.position())
 
+    def test_pointer_uses_custom_on_threshold_to_arm_pose(self):
+        from handtracking_handlers import update_pointer_state
+        from handtracking_state import FlowState, PointerState, SwipeState
+
+        pointer = PointerState()
+        cursor = FakeCursor()
+        flow = FlowState()
+        swipe = SwipeState()
+        pose_limits = []
+
+        update_pointer_state(
+            pointer,
+            control_hand=object(),
+            now=5.0,
+            commands_enabled=True,
+            spock_blocking=False,
+            hand_count=1,
+            paused=False,
+            volume_active=False,
+            two_hand_active=False,
+            two_hand_candidate=False,
+            radial_active=False,
+            scroll_active=False,
+            swipe_tracking=False,
+            input_blocked=False,
+            volume_candidate=False,
+            cursor=cursor,
+            flow=flow,
+            swipe=swipe,
+            precision_snap_active=False,
+            snap_anchor=None,
+            snap_started_at=None,
+            left_click_cb=lambda: None,
+            ratio_fn=lambda hand, finger: 0.25,
+            fingers_valid_fn=lambda hand: True,
+            pose_fn=lambda hand, limit: pose_limits.append(limit) or True,
+            pinch_on=0.25,
+            pinch_off=0.50,
+            pinch_release_brake=0.35,
+        )
+
+        self.assertTrue(pointer.pinch_held)
+        self.assertEqual(pose_limits, [0.25])
+
+    def test_pointer_uses_custom_off_and_brake_thresholds_on_release(self):
+        from handtracking_handlers import update_pointer_state
+        from handtracking_state import FlowState, PointerState, SwipeState
+
+        pointer = PointerState(pinch_held=True, pinch_started_at=1.0)
+        cursor = FakeCursor()
+        flow = FlowState()
+        swipe = SwipeState()
+        ratio = [0.35]
+        common = dict(
+            control_hand=object(),
+            commands_enabled=True,
+            spock_blocking=False,
+            hand_count=1,
+            paused=False,
+            volume_active=False,
+            two_hand_active=False,
+            two_hand_candidate=False,
+            radial_active=False,
+            scroll_active=False,
+            swipe_tracking=False,
+            input_blocked=False,
+            volume_candidate=False,
+            cursor=cursor,
+            flow=flow,
+            swipe=swipe,
+            precision_snap_active=False,
+            snap_anchor=None,
+            snap_started_at=None,
+            left_click_cb=lambda: None,
+            ratio_fn=lambda hand, finger: ratio[0],
+            fingers_valid_fn=lambda hand: True,
+            pose_fn=lambda hand, limit: False,
+            pinch_on=0.20,
+            pinch_off=0.40,
+            pinch_release_brake=0.30,
+        )
+
+        update_pointer_state(pointer, now=2.0, **common)
+
+        self.assertTrue(pointer.release_braking)
+        self.assertFalse(pointer.move_active)
+        self.assertIsNone(pointer.release_at)
+
+        ratio[0] = 0.45
+        update_pointer_state(pointer, now=2.5, **common)
+
+        self.assertEqual(pointer.release_at, 2.5)
+
 
 if __name__ == "__main__":
     unittest.main()

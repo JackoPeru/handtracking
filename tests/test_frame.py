@@ -55,6 +55,26 @@ def make_session():
 
 
 class FrameProcessorTests(unittest.TestCase):
+    def test_packet_accepts_recorded_reanchor_without_running_opencv(self):
+        from handtracking_frame import process_mediapipe_packet
+        from tests import test_runtime_smoke as helpers
+        session = make_session()
+        session.commands_enabled = True
+        packet = helpers.RuntimeSmokeTests._pinch_packet(1)
+        reanchor = mock.Mock(return_value=None)
+        with mock.patch("handtracking_flow.cv2.calcOpticalFlowPyrLK",
+                        side_effect=AssertionError("replay must not use LK")):
+            try:
+                result = process_mediapipe_packet(
+                    session, packet, gray=object(), now=10.0,
+                    camera_target_fps=60, reanchor_cb=reanchor,
+                )
+            except TypeError as exc:
+                self.fail("reanchor replay boundary unavailable: " + str(exc))
+        self.assertTrue(result.processed)
+        self.assertTrue(session.pointer.pinch_held)
+        reanchor.assert_called_once()
+
     def test_stale_packet_is_ignored_without_rearming_gesture_state(self):
         from handtracking_frame import process_mediapipe_packet
 

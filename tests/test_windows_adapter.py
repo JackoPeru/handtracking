@@ -72,6 +72,14 @@ class FailingInputUser32(FakeUser32):
         return super().keybd_event(*args)
 
 
+class ControlledClock:
+    def __init__(self, value=0.0):
+        self.value = float(value)
+
+    def __call__(self):
+        return self.value
+
+
 def wait_until(predicate, timeout=1.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -101,6 +109,144 @@ class WindowsAdapterTests(unittest.TestCase):
         cursor.add_delta(5000, -5000, screen_size=(1920, 1080))
 
         self.assertEqual(cursor.target, (1919.0, 0.0))
+
+    def test_cursor_renewal_does_not_activate_and_stale_renewal_cannot_extend(self):
+        from handtracking_windows import CursorController
+
+        clock = ControlledClock(10.0)
+        cursor = CursorController(
+            user32=FakeUser32(), clock=clock, freshness_timeout=0.22
+        )
+
+        self.assertTrue(cursor.renew_freshness(10.0))
+        self.assertFalse(cursor.active)
+        self.assertFalse(cursor.renew_freshness(9.0))
+        self.assertFalse(cursor.active)
+        self.assertTrue(cursor.renew_freshness(10.0))
+        cursor.sync(True)
+        self.assertTrue(cursor.active)
+
+        clock.value = 10.21
+        cursor.sync(False)
+        cursor.sync(True)
+        self.assertTrue(cursor.active)
+
+        clock.value = 10.23
+        cursor.sync(False)
+        cursor.sync(True)
+        self.assertFalse(cursor.active)
+
+    def test_cursor_invalid_freshness_inputs_fail_closed(self):
+        from handtracking_windows import CursorController
+
+        cursor = CursorController(user32=FakeUser32())
+        cursor.sync(True)
+        self.assertFalse(cursor.renew_freshness(float("nan")))
+        self.assertFalse(cursor.active)
+        self.assertFalse(cursor.renew_freshness(float("inf")))
+        self.assertFalse(cursor.active)
+
+    def test_cursor_rejects_future_or_stale_renewal_and_fails_closed(self):
+        from handtracking_windows import CursorController
+
+        clock = ControlledClock(10.0)
+        cursor = CursorController(user32=FakeUser32(), clock=clock)
+        cursor.renew_freshness(10.0)
+        cursor.sync(True)
+
+        self.assertFalse(cursor.renew_freshness(10.1))
+        self.assertFalse(cursor.active)
+
+        clock.value = 10.0
+        cursor = CursorController(user32=FakeUser32(), clock=clock)
+        cursor.renew_freshness(10.0)
+        cursor.sync(True)
+        self.assertFalse(cursor.renew_freshness(9.0))
+        self.assertFalse(cursor.active)
+
+        broken_clock = CursorController(
+            user32=FakeUser32(), clock=lambda: float("nan")
+        )
+        self.assertFalse(broken_clock.renew_freshness(10.0))
+        self.assertFalse(broken_clock.active)
+
+    def test_cursor_worker_skips_write_if_read_crosses_lease_deadline(self):
+        from handtracking_windows import CursorController
+
+        clock = ControlledClock(10.0)
+        fake = FakeUser32()
+        cursor = CursorController(
+            user32=fake, clock=clock, output_hz=500.0, interp_tau=0.001
+        )
+        cursor.renew_freshness(10.0)
+        cursor.sync(True)
+        cursor.add_delta(10, 0, screen_size=(1920, 1080))
+
+        original_position = cursor.position
+
+        def blocked_position():
+            result = original_position()
+            clock.value = 10.23
+            return result
+
+        cursor.position = blocked_position
+        cursor.start()
+        self.assertTrue(wait_until(lambda: not cursor.active))
+        self.assertFalse(cursor.active)
+        self.assertEqual(fake.moves, [])
+        cursor.close()
+
+    def test_cursor_output_latency_records_once_per_target_generation(self):
+        from handtracking_windows import CursorController
+
+        clock = ControlledClock(10.0)
+        fake = FakeUser32()
+        cursor = CursorController(
+            user32=fake, clock=clock, output_hz=500.0, interp_tau=0.001
+        )
+        cursor.renew_freshness(10.0)
+        cursor.sync(True)
+        cursor.set_input_time(9.9)
+        cursor.add_delta(10, 0, screen_size=(1920, 1080))
+        cursor.start()
+        self.assertTrue(wait_until(lambda: bool(fake.moves)))
+        time.sleep(0.01)
+        self.assertEqual(cursor.output_latency().samples, 1)
+
+        cursor.set_input_time(9.95)
+        cursor.add_delta(10, 0, screen_size=(1920, 1080))
+        self.assertTrue(wait_until(lambda: cursor.output_latency().samples == 2))
+        cursor.close()
+        metric = cursor.output_latency()
+        self.assertAlmostEqual(metric.p50_ms, 50.0)
+        self.assertAlmostEqual(metric.p95_ms, 100.0)
+        self.assertAlmostEqual(metric.p99_ms, 100.0)
+
+    def test_worker_expires_without_main_loop_reading_active_or_renewing(self):
+        from handtracking_windows import CursorController
+
+        clock = ControlledClock(10.0)
+        fake = FakeUser32()
+        cursor = CursorController(user32=fake, clock=clock, output_hz=500,
+                                  interp_tau=0.001)
+        original_send = fake.SetCursorPos
+        def expire_after_send(x, y):
+            result = original_send(x, y)
+            clock.value = 10.3
+            return result
+        fake.SetCursorPos = expire_after_send
+        cursor.renew_freshness(10.0)
+        cursor.sync(True)
+        cursor.add_delta(100, 0)
+        cursor.start()
+        try:
+            self.assertTrue(wait_until(lambda: len(fake.moves) == 1))
+            # No cursor.active/property calls: expiry must happen in the worker.
+            time.sleep(.03)
+            self.assertEqual(len(fake.moves), 1)
+            self.assertTrue(cursor.running)
+        finally:
+            cursor.close()
 
     def test_cursor_controller_stops_its_worker(self):
         from handtracking_windows import CursorController

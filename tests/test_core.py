@@ -17,6 +17,16 @@ def load_core():
 
 
 class CoreBehaviorTests(unittest.TestCase):
+    def test_freshness_rejects_invalid_future_and_expired_inputs(self):
+        core = load_core()
+        for timestamp in (float("nan"), float("inf"), 10.1, "invalid", True,
+                          10 ** 400):
+            with self.subTest(timestamp=timestamp):
+                self.assertTrue(core.tracking_result_is_stale(timestamp, 10.0, .22))
+        self.assertTrue(core.tracking_result_is_stale(1.0, 1.25, .25))
+        self.assertTrue(core.tracking_result_is_stale(1.0, float("nan"), .22))
+        self.assertTrue(core.tracking_result_is_stale(1.0, 1.0, float("nan")))
+
     def test_core_module_exists(self):
         self.assertTrue(CORE_PATH.exists(), "handtracking_core.py must exist")
 

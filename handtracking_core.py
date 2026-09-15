@@ -81,9 +81,18 @@ def normalized_points_pixel_distance(point_a, point_b, frame_width, frame_height
 
 
 def tracking_result_is_stale(last_success_at, now, timeout_seconds):
-    if last_success_at is None:
+    if last_success_at is None or isinstance(last_success_at, bool):
         return True
-    return float(now) - float(last_success_at) > max(float(timeout_seconds), 0.0)
+    try:
+        last_success_at, now, timeout_seconds = (
+            float(last_success_at), float(now), float(timeout_seconds)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return True
+    if not (math.isfinite(last_success_at) and math.isfinite(now) and
+            math.isfinite(timeout_seconds)):
+        return True
+    return last_success_at > now or now - last_success_at >= max(timeout_seconds, 0.0)
 
 
 def choose_camera_target_fps(reported_fps, target_fps=60, fallback_fps=30):

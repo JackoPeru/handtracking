@@ -16,6 +16,27 @@ py -3.12 -m venv .venv
 
 `requirements.txt` contiene solo le dipendenze dirette leggibili. `requirements.lock` e' il manifest operativo: blocca versioni e hash delle wheel verificate per Windows x64/CPython 3.12. Non aggirare il lock con installazioni non hashate o con sorgenti non binarie.
 
+Impostazioni e diagnostica:
+
+- Copiare `handtracking.example.json` in `handtracking.json` per una configurazione locale, ignorata da Git. In assenza del file restano i valori originali. `--config percorso.json` seleziona un file esplicito: errori, chiavi sconosciute o valori non validi fermano l'avvio prima della webcam.
+- `camera_index`: intero 0..16; `sensitivity`: 0.25..3; `pinch_on` e `pinch_off`: 0.05..1.5 con `pinch_on < pinch_off`. Le soglie riguardano il pinch puntatore; zoom/radiale restano invariati. Il freno di rilascio viene derivato tra le due soglie.
+- `--profile standard|precisione|rapidita`: guadagno movimento rispettivamente 1x/0.65x/1.35x, moltiplicato per `sensitivity`, sia per LK sia per fallback MediaPipe. L'opzione sovrascrive solo il profilo JSON.
+- L'HUD mostra p50/p95/p99 su una finestra di massimo 256 campioni. `Loop` misura il loop completo; `Frame->OS` misura dal frame letto al primo `SetCursorPos` riuscito per ogni nuovo target, non i successivi passi d'interpolazione. Non misura esposizione camera, latenza MediaPipe end-to-end o latenza percepita del display. `n` e' il totale dei campioni riusciti; a cursore fermo puo' restare zero.
+- Il cursore possiede una lease di freschezza di 220 ms dal timestamp dell'input MediaPipe: anche se il loop principale si blocca, il thread cursore interrompe i nuovi invii. LK e nuovi delta non rinnovano la lease. Una chiamata nativa gia' in corso non puo' essere interrotta.
+
+Tracce locali e replay senza webcam:
+
+```powershell
+.venv\Scripts\python.exe main.py --profile precisione
+.venv\Scripts\python.exe main.py --record traces\sessione.jsonl --record-max-frames 1800
+.venv\Scripts\python.exe main.py --replay traces\sessione.jsonl
+```
+
+La registrazione e' disattivata per default e non sovrascrive file esistenti. Conserva solo timestamp relativi, landmark, osservazioni LK/riallineamento e input/output gestuali necessari al replay: nessun video, frame, titolo finestra, audio o invio in rete. Include anche gli esiti della lease e le letture del cursore, per riprodurre un'eventuale scadenza durante il processing. I landmark restano dati di movimento personali: condividere le tracce solo consapevolmente. Limiti: 1..18000 frame (default 1800), massimo 64 MiB; il raggiungimento del limite ferma la registrazione, non l'app. Per tracce reali avviare la registrazione ed eseguire manualmente le gesture; `traces/` e' ignorata da Git.
+
+Il replay usa lo stesso loop e le stesse macchine a stati, sostituendo solo camera, clock, osservazioni CV e confine OS con adapter dry-run. Non apre webcam/finestre e non muove il cursore reale. Verifica modalita' e intenti gestuali contro la traccia. I fixture in `tests/fixtures/` sono sintetici, non prove di accuratezza su webcam reale.
+Una discordanza nel replay restituisce un errore CLI, non un esito positivo.
+
 Aggiornamento del lock:
 
 1. Aggiornare solo i pin diretti in `requirements.txt`.
@@ -40,6 +61,8 @@ Struttura principale:
 - `handtracking_scroll.py`: arm/release dello scroll MediaPipe.
 - `handtracking_spock.py`: macchina a stati Spock e release senza mano.
 - `handtracking_config.py`: costanti e soglie senza side effect.
+- `handtracking_settings.py`: impostazioni immutabili e validazione JSON.
+- `handtracking_trace.py`: registratore locale e replay dry-run dello stesso runtime.
 - `handtracking_gestures.py`: geometria e classificatori gesture puri.
 - `handtracking_engine.py`: priorita' e risoluzione della modalita' gesture.
 - `handtracking_flow.py`: optical flow LK, filtro del movimento e dispatch camera-rate di swipe/scroll/puntatore.
@@ -50,7 +73,7 @@ Struttura principale:
 - `handtracking_render.py`: rendering OpenCV e overlay.
 - `handtracking_hud.py`: stato testuale, diagnostica, LED e barra Spock.
 - `handtracking_display.py`: layer HUD cached a frequenza ridotta senza rallentare tracking/input.
-- `handtracking_perf.py`: profiler EMA e scheduler adattivo dei submit MediaPipe.
+- `handtracking_perf.py`: profiler EMA/percentili limitati e scheduler adattivo dei submit MediaPipe.
 - `handtracking_core.py`: logica pura e testabile di priorita', timing e tracking della mano.
 - `handtracking_mediapipe.py`: worker di inferenza che possiede il ciclo di vita del `HandLandmarker`.
 - `benchmarks/hotpath_benchmark.py`: micro-benchmark riproducibile di geometria, LK, preprocessing e rendering.
@@ -64,6 +87,7 @@ Benchmark hot path: `python -m benchmarks.hotpath_benchmark`.
 Ottimizzazioni runtime principali:
 
 - optical flow LK eseguito solo quando pointer/scroll/swipe possono consumarlo;
+- movimento puntatore esclusivo per frame: LK valido oppure fallback MediaPipe, mai entrambi;
 - preprocessing 640x360/gray eseguito solo per submit MediaPipe, LK o nuovo packet da riallineare;
 - `HandFeatures` memoizza geometria e angoli condivisi per ogni mano/risultato MediaPipe;
 - `RuntimeSession` e' la singola source of truth dello stato scalare del loop;
@@ -73,5 +97,7 @@ Ottimizzazioni runtime principali:
 - state/result object hot slotted e aggiornamenti 2D flow in-place per ridurre allocazioni.
 
 Sul benchmark sintetico usato durante la fase performance, la geometria rappresentativa e' passata da circa 65 us a 51 us per mano (-20% circa); HUD da circa 0,80 ms/frame diretto a 0,39 ms/frame medio cached. I valori dipendono dall'hardware: usare sempre il benchmark locale prima di modificare frequenze o strategie di caching.
+
+Il confronto abbinato prima/dopo l'aggiunta dei percentili (mediana di 5 prove alternate) ha misurato HUD cached 0,354 -> 0,372 ms/frame e osservazione profiler 0,871 -> 1,415 us/campione. I percentili vengono ordinati solo durante la lettura delle metriche, alla frequenza ridotta dell'HUD. Il benchmark include ora le nuove righe diagnostiche e riporta anche costo di osservazione/lettura del profiler; non e' una misura di latenza della webcam reale.
 
 La modalita' a due mani implementa lo zoom. La vecchia indicazione di rotazione e' stata rimossa perche' non esiste una scorciatoia di rotazione universale affidabile tra le applicazioni Windows.

@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 
 class FakeCamera:
@@ -52,6 +53,30 @@ class FakeCursor:
 
 
 class RuntimeSessionTests(unittest.TestCase):
+    def test_session_owns_trace_close_even_when_it_fails(self):
+        from handtracking_session import RuntimeSession
+        for failure in (False, True):
+            with self.subTest(close_failure=failure):
+                camera, worker, cursor = FakeCamera(), FakeWorker(), FakeCursor()
+                trace = mock.Mock()
+                if failure:
+                    trace.close.side_effect = OSError("trace close failed")
+                session = RuntimeSession(camera=camera, worker=worker, cursor=cursor,
+                                         screen_w=1920, screen_h=1080, start_time=10,
+                                         trace=trace)
+                if failure:
+                    with self.assertRaisesRegex(OSError, "trace close failed"):
+                        session.close()
+                else:
+                    session.close()
+                self.assertTrue(camera.closed)
+                self.assertTrue(worker.stopped)
+                self.assertTrue(worker.joined)
+                self.assertTrue(cursor.closed)
+                trace.close.assert_called_once()
+                session.close()
+                trace.close.assert_called_once()
+
     def setUp(self):
         FakeWorker.instances.clear()
         FakeCursor.instances.clear()

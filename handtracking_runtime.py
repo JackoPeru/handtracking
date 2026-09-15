@@ -22,6 +22,7 @@ from handtracking_processing import update_precision_snap
 from handtracking_config import *
 from handtracking_render import draw_runtime_overlays
 from handtracking_session import RuntimeSession
+from handtracking_settings import RuntimeSettings
 from handtracking_tracking import (
     apply_stale_fail_safe,
     expire_lost_flow,
@@ -35,7 +36,19 @@ from handtracking_windows import (
 # Limitarlo evita contesa CPU con MediaPipe/XNNPACK sul portatile 4C/8T.
 cv2.setNumThreads(1)
 
-def _run_impl(session):
+def _run_impl(session, *, now_fn=None, measure_flow_fn=None,
+              process_packet_fn=None, execute_swipe_fn=None, mouse_wheel_fn=None):
+    now_fn = now_fn or time.perf_counter
+    measure_flow_fn = measure_flow_fn or measure_optical_flow
+    process_packet_fn = process_packet_fn or (
+        session.trace.process_packet if session.trace else process_mediapipe_packet
+    )
+    execute_swipe_fn = execute_swipe_fn or (
+        session.trace.execute_swipe if session.trace else execute_swipe
+    )
+    mouse_wheel_fn = mouse_wheel_fn or (
+        session.trace.mouse_wheel if session.trace else mouse_wheel
+    )
     camera = session.camera
     mp_worker = session.worker
     cursor = session.cursor
@@ -56,7 +69,8 @@ def _run_impl(session):
         perf.observe_ns("camera", camera_started)
         if frame is None:
             break
-        now = time.perf_counter()
+        now = now_fn()
+        cursor.set_input_time(now)
         mp_state = mp_worker.snapshot_state()
         packet = mp_state["latest"]
         if not mp_state["alive"]:
@@ -72,6 +86,11 @@ def _run_impl(session):
         mp_result_stale = tracking_result_is_stale(
             mp_state["last_result_input_at"], now, MP_RESULT_STALE_SECONDS,
         )
+        if session.trace:
+            session.trace.start_frame(now, mp_state, cursor.position())
+        if not mp_result_stale:
+            if cursor.renew_freshness(mp_state["last_result_input_at"]) is False:
+                mp_result_stale = True
 
         if mp_result_stale:
             stale = apply_stale_fail_safe(
@@ -138,25 +157,30 @@ def _run_impl(session):
         flow_motion = None
         if flow_due:
             flow_started = perf.now_ns()
-            flow_motion = measure_optical_flow(
+            flow_motion = measure_flow_fn(
                 flow.prev_gray, gray, flow.points, flow.motion_scale
             )
             perf.observe_ns("flow", flow_started)
             commit_flow_measurement(flow, gray, flow_motion, now=now)
+        if session.trace:
+            session.trace.set_motion(flow_motion)
         # LK measurement has no OS side effects; fresh safety state must be
         # applied before dispatch consumes the measured motion.
         mp_process_started = perf.now_ns()
-        frame_result = process_mediapipe_packet(
+        frame_result = process_packet_fn(
             session,
             packet,
             gray=gray,
             now=now,
             camera_target_fps=session.camera_target_fps,
             mp_result_stale=mp_result_stale,
+            allow_pointer_fallback=flow_motion is None,
         )
         if frame_result.processed:
             perf.observe_ns("mp_process", mp_process_started)
         if frame_result.skip_frame:
+            if session.trace:
+                session.trace.finish_frame(session)
             perf.observe_ns("loop", loop_started)
             continue
 
@@ -184,8 +208,9 @@ def _run_impl(session):
                 precision_snap_active=session.precision_snap_active,
                 snap_anchor=session.snap_anchor,
                 snap_started_at=session.snap_started_at,
-                execute_swipe_cb=execute_swipe,
-                mouse_wheel_cb=mouse_wheel,
+                execute_swipe_cb=execute_swipe_fn,
+                mouse_wheel_cb=mouse_wheel_fn,
+                move_gain=session.settings.move_gain,
             )
             if flow_result.gesture_event is not None:
                 session.gesture_event = flow_result.gesture_event
@@ -230,22 +255,6 @@ def _run_impl(session):
             pointer_move=pointer.move_active,
             pointer_pinch=pointer.pinch_held,
         )
-        render_started = perf.now_ns()
-        draw_runtime_overlays(
-            frame,
-            latest_result=session.latest_result,
-            fist_states=session.fist_states,
-            control_index=session.control_index,
-            pinch_active=pointer.pinch_held,
-            scroll_active=scroll.active,
-            volume_active=volume.active,
-            radial_active=radial.active,
-            radial_center=radial.center,
-            radial_selected=radial.selected,
-            two_hand_active=two_hand.active,
-            two_hand_points=two_hand.points,
-        )
-
         session.fps_frames += 1
         elapsed = now - session.fps_window_start
         if elapsed >= 0.5:
@@ -262,6 +271,27 @@ def _run_impl(session):
             session.actual_mp_fps = (completed_seq - session.mp_fps_last_seq) / mp_elapsed
             session.mp_fps_last_seq = completed_seq
             session.mp_fps_window_start = now
+
+        if session.trace:
+            session.trace.finish_frame(session)
+        if not session.render_enabled:
+            perf.observe_ns("loop", loop_started)
+            continue
+        render_started = perf.now_ns()
+        draw_runtime_overlays(
+            frame,
+            latest_result=session.latest_result,
+            fist_states=session.fist_states,
+            control_index=session.control_index,
+            pinch_active=pointer.pinch_held,
+            scroll_active=scroll.active,
+            volume_active=volume.active,
+            radial_active=radial.active,
+            radial_center=radial.center,
+            radial_selected=radial.selected,
+            two_hand_active=two_hand.active,
+            two_hand_points=two_hand.points,
+        )
 
         if session.hud_layer.should_refresh(frame, now):
             hud = session.hud_layer.begin(frame)
@@ -317,6 +347,9 @@ def _run_impl(session):
                 perf_mp_process_ms=perf_mp_process.ema_ms,
                 perf_render_ms=perf_render.ema_ms,
                 perf_loop_ms=perf_loop.ema_ms,
+                loop_metric=perf_loop,
+                cursor_metric=cursor.output_latency(),
+                profile=session.settings.profile,
             )
             session.hud_layer.finish(now)
         session.hud_layer.apply(frame)
@@ -328,11 +361,24 @@ def _run_impl(session):
     return None
 
 
-def run():
-    camera = CameraRuntime.open()
+def run(*, settings=None, record_path=None, record_max_frames=1800):
+    settings = settings if settings is not None else RuntimeSettings()
+    camera = CameraRuntime.open(camera_index=settings.camera_index)
     session = None
     try:
-        session = RuntimeSession.create(camera=camera)
+        session = RuntimeSession.create(camera=camera, settings=settings)
+        if record_path is not None:
+            from handtracking_trace import TraceRecorder
+            session.trace = TraceRecorder(
+                path=record_path, settings=settings,
+                screen_size=(session.screen_w, session.screen_h),
+                started_at=session.start_time, initial_cursor=session.cursor.position(),
+                initial_volume=session.volume.level,
+                initial_commands_enabled=session.commands_enabled,
+                camera_target_fps=session.camera_target_fps,
+                max_frames=record_max_frames,
+            )
+            session.cursor = session.trace.wrap_cursor(session.cursor)
         return _run_impl(session)
     finally:
         if session is not None:
