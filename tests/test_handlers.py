@@ -29,6 +29,34 @@ class FakeFlow:
 
 
 class HandlerTests(unittest.TestCase):
+    def test_pointer_does_not_restore_or_click_when_output_gate_expires(self):
+        from handtracking_handlers import update_pointer_state
+        from handtracking_state import FlowState, PointerState, SwipeState
+        pointer = PointerState(
+            pinch_held=True, pinch_started_at=1.0, release_at=1.1,
+            cursor_origin=(20, 30),
+        )
+        cursor = FakeCursor()
+        clicks = []
+        result = update_pointer_state(
+            pointer, control_hand=object(), now=1.2,
+            commands_enabled=True, spock_blocking=False, hand_count=1,
+            paused=False, volume_active=False, two_hand_active=False,
+            two_hand_candidate=False, radial_active=False, scroll_active=False,
+            swipe_tracking=False, input_blocked=False, volume_candidate=False,
+            cursor=cursor, flow=FlowState(), swipe=SwipeState(),
+            precision_snap_active=False, snap_anchor=None, snap_started_at=None,
+            left_click_cb=lambda: clicks.append(True),
+            output_allowed_cb=lambda: False,
+            ratio_fn=lambda hand, finger: 1.0,
+            fingers_valid_fn=lambda hand: True,
+            pose_fn=lambda hand, limit: False,
+        )
+        self.assertEqual(clicks, [])
+        self.assertEqual(cursor.position(), (320, 180))
+        self.assertIsNone(result.event)
+        self.assertFalse(pointer.pinch_held)
+
     def test_two_hand_release_resets_state_and_rearms_cursor(self):
         from handtracking_config import TWO_HAND_RELEASE_GRACE
         from handtracking_handlers import update_two_hand_state

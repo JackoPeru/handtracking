@@ -36,6 +36,35 @@ from handtracking_windows import (
 # Limitarlo evita contesa CPU con MediaPipe/XNNPACK sul portatile 4C/8T.
 cv2.setNumThreads(1)
 
+
+def _apply_stale_state(session):
+    stale = apply_stale_fail_safe(
+        spock=session.spock,
+        fist_vote_history=session.fist_vote_history,
+        volume=session.volume,
+        scroll=session.scroll,
+        two_hand=session.two_hand,
+        radial=session.radial,
+        swipe=session.swipe,
+        pointer=session.pointer,
+        flow=session.flow,
+        cursor=session.cursor,
+    )
+    session.paused_by_fist = stale.paused_by_fist
+    session.mp_control_ref = stale.mp_control_ref
+    session.control_handedness = stale.control_handedness
+    session.latest_result = stale.latest_result
+    session.fist_states = stale.fist_states
+    session.debug_fist_score = stale.debug_fist_score
+    session.debug_volume_score = stale.debug_volume_score
+    session.debug_grip_gap = stale.debug_grip_gap
+    session.debug_fist_folded = stale.debug_fist_folded
+    session.debug_fist_tightness = stale.debug_fist_tightness
+    session.debug_strong_fist = stale.debug_strong_fist
+    session.snap_anchor = stale.snap_anchor
+    session.snap_started_at = stale.snap_started_at
+    session.precision_snap_active = stale.precision_snap_active
+
 def _run_impl(session, *, now_fn=None, measure_flow_fn=None,
               process_packet_fn=None, execute_swipe_fn=None, mouse_wheel_fn=None):
     now_fn = now_fn or time.perf_counter
@@ -93,32 +122,7 @@ def _run_impl(session, *, now_fn=None, measure_flow_fn=None,
                 mp_result_stale = True
 
         if mp_result_stale:
-            stale = apply_stale_fail_safe(
-                spock=spock,
-                fist_vote_history=session.fist_vote_history,
-                volume=volume,
-                scroll=scroll,
-                two_hand=two_hand,
-                radial=radial,
-                swipe=swipe,
-                pointer=pointer,
-                flow=flow,
-                cursor=cursor,
-            )
-            session.paused_by_fist = stale.paused_by_fist
-            session.mp_control_ref = stale.mp_control_ref
-            session.control_handedness = stale.control_handedness
-            session.latest_result = stale.latest_result
-            session.fist_states = stale.fist_states
-            session.debug_fist_score = stale.debug_fist_score
-            session.debug_volume_score = stale.debug_volume_score
-            session.debug_grip_gap = stale.debug_grip_gap
-            session.debug_fist_folded = stale.debug_fist_folded
-            session.debug_fist_tightness = stale.debug_fist_tightness
-            session.debug_strong_fist = stale.debug_strong_fist
-            session.snap_anchor = stale.snap_anchor
-            session.snap_started_at = stale.snap_started_at
-            session.precision_snap_active = stale.precision_snap_active
+            _apply_stale_state(session)
 
         submit_due = session.mp_scheduler.should_submit(
             now,
@@ -164,6 +168,26 @@ def _run_impl(session, *, now_fn=None, measure_flow_fn=None,
             commit_flow_measurement(flow, gray, flow_motion, now=now)
         if session.trace:
             session.trace.set_motion(flow_motion)
+
+        def output_allowed():
+            nonlocal mp_result_stale, flow_motion
+            current = now_fn()
+            time_fresh = not tracking_result_is_stale(
+                mp_state["last_result_input_at"], current,
+                MP_RESULT_STALE_SECONDS,
+            )
+            lease_fresh = cursor.check_freshness(
+                mp_state["last_result_input_at"]
+            ) is not False
+            fresh = time_fresh and lease_fresh
+            if not fresh and not mp_result_stale:
+                mp_result_stale = True
+                flow_motion = None
+                _apply_stale_state(session)
+            return fresh
+
+        if not mp_result_stale:
+            output_allowed()
         # LK measurement has no OS side effects; fresh safety state must be
         # applied before dispatch consumes the measured motion.
         mp_process_started = perf.now_ns()
@@ -175,6 +199,7 @@ def _run_impl(session, *, now_fn=None, measure_flow_fn=None,
             camera_target_fps=session.camera_target_fps,
             mp_result_stale=mp_result_stale,
             allow_pointer_fallback=flow_motion is None,
+            output_allowed_cb=output_allowed,
         )
         if frame_result.processed:
             perf.observe_ns("mp_process", mp_process_started)
@@ -183,6 +208,9 @@ def _run_impl(session, *, now_fn=None, measure_flow_fn=None,
                 session.trace.finish_frame(session)
             perf.observe_ns("loop", loop_started)
             continue
+
+        if flow_motion is not None:
+            output_allowed()
 
         if flow_motion is not None:
             flow_result = dispatch_flow_motion(
@@ -385,7 +413,3 @@ def run(*, settings=None, record_path=None, record_max_frames=1800):
             session.close()
         else:
             camera.close()
-
-
-if __name__ == "__main__":
-    run()

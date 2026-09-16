@@ -54,6 +54,7 @@ def update_pointer_state(
     snap_anchor,
     snap_started_at,
     left_click_cb,
+    output_allowed_cb=None,
     ratio_fn=normalized_pinch_ratio,
     fingers_valid_fn=pointer_other_fingers_valid,
     pose_fn=is_pointer_pinch_pose,
@@ -100,6 +101,11 @@ def update_pointer_state(
                     pointer.flow_travel <= POINTER_CLICK_MAX_TRAVEL_PX
                 )
                 if quick_click:
+                    if output_allowed_cb is not None and not output_allowed_cb():
+                        pointer.reset(preserve_last_click=True)
+                        cursor.sync(False)
+                        flow.clear_motion()
+                        return PointerResult(None, None, False, None, None)
                     if pointer.cursor_origin is not None:
                         cursor.set_position(
                             pointer.cursor_origin[0], pointer.cursor_origin[1]
@@ -109,7 +115,12 @@ def update_pointer_state(
                         pointer.last_click_at is not None and
                         now - pointer.last_click_at <= DOUBLE_PINCH_WINDOW
                     )
-                    left_click_cb()
+                    click_result = left_click_cb()
+                    if click_result is False:
+                        pointer.reset(preserve_last_click=True)
+                        cursor.sync(False)
+                        flow.clear_motion()
+                        return PointerResult(None, None, False, None, None)
                     if is_double_pinch:
                         event = "DOPPIO PINCH: DOPPIO CLICK"
                         pointer.last_click_at = None
@@ -206,7 +217,11 @@ def update_two_hand_state(
                         two_hand.last_distance = stable_distance
                         zoom_steps = int(two_hand.zoom_residual / TWO_HAND_WHEEL_STEP)
                         if zoom_steps != 0:
-                            ctrl_wheel_cb(zoom_steps * int(TWO_HAND_WHEEL_STEP))
+                            if ctrl_wheel_cb(zoom_steps * int(TWO_HAND_WHEEL_STEP)) is False:
+                                two_hand.reset()
+                                cursor.sync(False)
+                                flow.clear_motion()
+                                return input_block_until
                             two_hand.zoom_residual -= zoom_steps * TWO_HAND_WHEEL_STEP
             two_hand.points = (point_a, point_b)
     elif two_hand.active:
@@ -271,6 +286,11 @@ def update_radial_state(
                     now - radial.pinch_candidate_at >= RADIAL_PINCH_CONFIRM):
                 radial.pinch_latched = True
                 action_label = execute_action_cb(radial.selected)
+                if action_label is False:
+                    radial.reset()
+                    cursor.sync(False)
+                    flow.clear_motion()
+                    return HandlerResult(None, None, input_block_until)
                 event = f"RADIAL: {action_label}"
                 event_until = now + GESTURE_EVENT_SHOW_SECONDS
                 input_block_until = now + 0.20

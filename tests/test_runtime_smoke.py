@@ -99,6 +99,9 @@ class FakeCursor:
         self.renewals.append(input_at)
         return True
 
+    def check_freshness(self, input_at):
+        return True
+
     def set_input_time(self, input_at):
         self.input_times.append(input_at)
 
@@ -216,6 +219,36 @@ class NullHud:
 
 
 class RuntimeSmokeTests(unittest.TestCase):
+    def test_slow_flow_cannot_dispatch_after_input_expires(self):
+        from handtracking_flow import LKMotion
+        clock = [10.0]
+        camera = FakeRuntimeCamera()
+        worker = PacketWorker([self._packet(1)])
+        class ExpiringCursor(FakeCursor):
+            def check_freshness(self, input_at):
+                return clock[0] - input_at < .22
+        cursor = ExpiringCursor()
+        session = self._make_runtime_session(camera, worker, cursor)
+        worker.result_input_at = 9.995
+        session.latest_result_seq = 1
+        session.scroll.active = True
+        session.flow.prev_gray = camera.gray
+        session.flow.points = np.zeros((5, 1, 2), dtype=np.float32)
+        session.flow.active = True
+        wheels = []
+
+        def delayed_flow(*args):
+            clock[0] = 10.5
+            return LKMotion(session.flow.points, 0.0, 20.0, 20.0)
+
+        self._run_runtime_session(session, runtime_kwargs={
+            "now_fn": lambda: clock[0],
+            "measure_flow_fn": delayed_flow,
+            "mouse_wheel_fn": wheels.append,
+        })
+        self.assertEqual(wheels, [])
+        self.assertFalse(session.scroll.active)
+
     def test_record_creation_failure_releases_the_live_session(self):
         import handtracking_runtime as runtime
         camera, worker, cursor = FakeRuntimeCamera(), FakeWorker(), FakeCursor()
@@ -596,7 +629,8 @@ class RuntimeSmokeTests(unittest.TestCase):
                 side_effect=self._session_create_side_effect(runtime, worker, cursor),
             ),
         ):
-            runtime.run()
+            with self.assertRaisesRegex(RuntimeError, "frame webcam"):
+                runtime.run()
 
         self.assertTrue(worker.stopped)
         self.assertTrue(worker.joined)

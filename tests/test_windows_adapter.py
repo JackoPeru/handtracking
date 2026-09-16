@@ -90,6 +90,21 @@ def wait_until(predicate, timeout=1.0):
 
 
 class WindowsAdapterTests(unittest.TestCase):
+    def test_foreground_title_uses_bounded_buffer(self):
+        from handtracking_windows import foreground_window_title
+        class HugeTitleUser32(FakeUser32):
+            def GetForegroundWindow(self):
+                return 1
+            def GetWindowTextLengthW(self, hwnd):
+                return 10_000_000
+            def GetWindowTextW(self, hwnd, buffer, size):
+                self.requested_title_size = size
+                buffer.value = "X" * min(size - 1, 16)
+                return len(buffer.value)
+        api = HugeTitleUser32()
+        self.assertEqual(foreground_window_title(api), "X" * 16)
+        self.assertLessEqual(api.requested_title_size, 4097)
+
     def test_cursor_controller_is_inactive_until_explicitly_started(self):
         from handtracking_windows import CursorController
 

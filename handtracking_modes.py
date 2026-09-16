@@ -121,6 +121,7 @@ def process_pointer(
     volume_candidate_now,
     now,
     left_click_cb,
+    output_allowed_cb=None,
 ):
     result = update_pointer_state(
         session.pointer,
@@ -147,6 +148,7 @@ def process_pointer(
         snap_anchor=session.snap_anchor,
         snap_started_at=session.snap_started_at,
         left_click_cb=left_click_cb,
+        output_allowed_cb=output_allowed_cb,
         pinch_on=session.settings.pinch_on,
         pinch_off=session.settings.pinch_off,
         pinch_release_brake=session.settings.pinch_release_brake,

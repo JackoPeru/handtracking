@@ -24,6 +24,10 @@ class RuntimeContractTests(unittest.TestCase):
     def test_runtime_is_separate_from_entrypoint(self):
         self.assertTrue((ROOT / "handtracking_runtime.py").exists())
 
+    def test_runtime_has_no_direct_launcher(self):
+        runtime = (ROOT / "handtracking_runtime.py").read_text(encoding="utf-8")
+        self.assertNotIn('if __name__ == "__main__":', runtime)
+
     def test_public_repo_has_dependency_manifest(self):
         requirements = ROOT / "requirements.txt"
         self.assertTrue(requirements.exists())
@@ -87,6 +91,25 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("unittest discover -s tests", text)
         self.assertIn("py_compile", text)
         self.assertIn("pip check", text)
+
+    def test_ci_install_step_uses_yaml_safe_block_scalar(self):
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8"
+        )
+        start = workflow.index("      - name: Install dependencies")
+        end = workflow.find("\n      - name:", start + 1)
+        install_step = workflow[start:] if end < 0 else workflow[start:end]
+
+        self.assertRegex(install_step, r"(?m)^        run:\s*\|\s*$")
+        self.assertRegex(
+            install_step,
+            r"(?m)^\s+python -m pip install --require-hashes "
+            r"--only-binary=:all: -r requirements\.lock\s*$",
+        )
+        self.assertNotRegex(
+            install_step,
+            r"(?m)^\s+run:\s+(?!\|)[^\r\n]*:\s",
+        )
 
 
 if __name__ == "__main__":

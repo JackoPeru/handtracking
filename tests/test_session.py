@@ -53,6 +53,23 @@ class FakeCursor:
 
 
 class RuntimeSessionTests(unittest.TestCase):
+    def test_create_cleans_started_resources_on_keyboard_interrupt(self):
+        from handtracking_session import RuntimeSession
+        class InterruptedCursor:
+            def __init__(self):
+                raise KeyboardInterrupt()
+        camera = FakeCamera()
+        with self.assertRaises(KeyboardInterrupt):
+            RuntimeSession.create(
+                camera=camera, worker_cls=FakeWorker, cursor_cls=InterruptedCursor,
+                landmarker_factory=object(), options=object(),
+                image_builder=lambda frame: frame, get_volume=lambda: .5,
+            )
+        worker = FakeWorker.instances[-1]
+        self.assertTrue(worker.stopped)
+        self.assertTrue(worker.joined)
+        self.assertTrue(camera.closed)
+
     def test_session_owns_trace_close_even_when_it_fails(self):
         from handtracking_session import RuntimeSession
         for failure in (False, True):

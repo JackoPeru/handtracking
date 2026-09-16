@@ -37,6 +37,15 @@ class FakeCapture:
 
 
 class CameraRuntimeTests(unittest.TestCase):
+    def test_read_failure_is_explicit_after_camera_opened(self):
+        import handtracking_camera as camera
+        runtime = camera.CameraRuntime(
+            capture=FakeCapture(opened=True), reported_fps=60,
+            reported_w=1280, reported_h=720, codec="MJPG", target_fps=60,
+        )
+        with self.assertRaisesRegex(RuntimeError, "frame.*webcam"):
+            runtime.read_frame()
+
     def test_open_falls_back_from_msmf_and_applies_current_capture_contract(self):
         import handtracking_camera as camera
 

@@ -61,6 +61,9 @@ class _Cursor:
     def renew_freshness(self, value):
         pass
 
+    def check_freshness(self, value):
+        return True
+
 
 def record_synthetic_pinch(path, *, max_frames=1800, moving=False, lose_lease=False,
                            reject_lease=False):
@@ -200,6 +203,32 @@ class TraceRecorderTests(unittest.TestCase):
         self.assertEqual(result["modes"], ["PINCH", "PINCH", "MOUSE"])
         self.assertEqual(sum(c["kind"] == "click" for c in result["commands"]), 1)
 
+    def test_synthetic_golden_corpus_covers_each_runtime_mode(self):
+        fixtures = Path(__file__).with_name("fixtures")
+        expected = {
+            "spock_toggle.jsonl": ("SPOCK", None),
+            "scroll_wheel.jsonl": ("SCROLL", "wheel"),
+            "swipe.jsonl": ("SWIPE", "swipe"),
+            "volume.jsonl": ("VOLUME", "volume"),
+            "two_hand_zoom.jsonl": ("TWO_HAND", "ctrl_wheel"),
+            "radial.jsonl": ("RADIAL", "radial"),
+        }
+        for filename, (mode, command_kind) in expected.items():
+            with self.subTest(filename=filename):
+                path = fixtures / filename
+                self.assertTrue(path.is_file(), f"synthetic golden fixture missing: {filename}")
+                result = replay_without_native_io(path)
+                self.assertTrue(result["verified"], result["mismatches"])
+                self.assertEqual(result["source"], "synthetic")
+                self.assertIn(mode, result["modes"])
+                if command_kind is None:
+                    self.assertEqual(result["commands"], [], f"{filename} must gate commands")
+                else:
+                    self.assertTrue(
+                        any(command["kind"] == command_kind for command in result["commands"]),
+                        f"{filename} must emit {command_kind}",
+                    )
+
     def test_replay_rejects_recorded_motion_the_runtime_did_not_admit(self):
         path = Path(__file__).with_name("fixtures") / "pinch_release.jsonl"
         records = [json.loads(line) for line in path.read_text().splitlines()]
@@ -336,7 +365,9 @@ class TraceRecorderTests(unittest.TestCase):
             try:
                 recorder.start_frame(10.1, dict(latest=None, last_success_at=10.1001,
                                                last_result_input_at=10.09), (0, 0))
-                recorder.wrap_cursor(_Cursor()).renew_freshness(10.09)
+                wrapped = recorder.wrap_cursor(_Cursor())
+                wrapped.renew_freshness(10.09)
+                wrapped.check_freshness(10.09)
                 recorder.finish_frame(_Session(_Cursor()))
             finally:
                 recorder.close()
@@ -366,7 +397,7 @@ class TraceRecorderTests(unittest.TestCase):
 
             records = [json.loads(line) for line in path.read_text().splitlines()]
 
-        self.assertEqual(records[0]["schemaVersion"], 1)
+        self.assertEqual(records[0]["schemaVersion"], 2)
         self.assertEqual(records[0]["source"], "recorded")
         self.assertEqual(records[1]["type"], "frame")
         self.assertEqual(

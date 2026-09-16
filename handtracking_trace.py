@@ -23,7 +23,7 @@ from handtracking_settings import RuntimeSettings
 from handtracking_config import MP_RESULT_STALE_SECONDS
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_TRACE_FRAMES = 18000
 DEFAULT_TRACE_FRAMES = 1800
 MAX_TRACE_BYTES = 64 * 1024 * 1024
@@ -59,7 +59,9 @@ _PACKET_KEYS = {
 }
 _RESULT_KEYS = {"hand_landmarks", "hand_world_landmarks", "handedness"}
 _MOTION_KEYS = {"dx", "dy", "magnitude", "next_points"}
-_CURSOR_KEYS = {"start", "reads", "active_reads", "lease_accepted"}
+_CURSOR_KEYS = {
+    "start", "reads", "active_reads", "lease_accepted", "safety_checks",
+}
 _CV_KEYS = {"reanchors"}
 _CV_EVENT_KEYS = {"corrected", "points", "active", "prev_gray"}
 
@@ -376,6 +378,11 @@ class _CursorProxy:
         self._recorder._record_cursor_lease(result is not False)
         return result
 
+    def check_freshness(self, input_at):
+        result = self._cursor.check_freshness(input_at)
+        self._recorder._record_safety_check(result is not False)
+        return result
+
     @property
     def active(self):
         value = bool(self._cursor.active)
@@ -498,6 +505,10 @@ class TraceRecorder:
         if self._frame is not None and self.recording:
             self._frame["cursor"]["lease_accepted"] = bool(accepted)
 
+    def _record_safety_check(self, accepted):
+        if self._frame is not None and self.recording:
+            self._frame["cursor"]["safety_checks"].append(bool(accepted))
+
     def start_frame(self, now, mp_state, cursor_position):
         if not self.recording or self._frame_count >= self.max_frames:
             self._recording = False
@@ -526,6 +537,7 @@ class TraceRecorder:
                 "reads": [],
                 "active_reads": [],
                 "lease_accepted": None,
+                "safety_checks": [],
             },
             "motion": None,
             "cv": {"reanchors": []},
@@ -691,6 +703,24 @@ def _read_trace(path):
             raise TraceFormatError(f"invalid JSON at line {line_number}") from exc
         _validate_json_values(record, f"line {line_number}", format_error=True)
         records.append(record)
+    if records and records[0].get("schemaVersion") == 1:
+        for frame in records[1:]:
+            cursor = frame.get("cursor")
+            if isinstance(cursor, dict):
+                accepted = cursor.get("lease_accepted")
+                checks = [] if accepted is None else [bool(accepted)]
+                if accepted is not None and frame.get("motion") is not None:
+                    checks.append(bool(accepted))
+                callback_checks = len(frame.get("volume_reads", []))
+                callback_checks += len(frame.get("volume_sets", []))
+                callback_checks += sum(
+                    2 if command.get("kind") == "click" else 1
+                    for command in frame.get("commands", [])
+                    if isinstance(command, dict) and
+                    command.get("kind") in {"click", "ctrl_wheel", "radial"}
+                )
+                checks.extend([bool(accepted)] * callback_checks)
+                cursor.setdefault("safety_checks", checks)
     _validate_records(records)
     return records[0], records[1:]
 
@@ -762,7 +792,7 @@ def _validate_records(records):
     _exact_keys(header, _HEADER_KEYS, "header", format_error=True)
     if header.get("type") != "header":
         _error("unsupported trace schema", format_error=True)
-    _integer(header.get("schemaVersion"), "header.schemaVersion", minimum=SCHEMA_VERSION, maximum=SCHEMA_VERSION, format_error=True)
+    _integer(header.get("schemaVersion"), "header.schemaVersion", minimum=1, maximum=SCHEMA_VERSION, format_error=True)
     source = header.get("source")
     if not isinstance(source, str) or source not in _VALID_SOURCES:
         _error("header.source invalid", format_error=True)
@@ -819,6 +849,11 @@ def _validate_records(records):
             _error("frame.cursor.active_reads invalid", format_error=True)
         if cursor["lease_accepted"] is not None and not isinstance(cursor["lease_accepted"], bool):
             _error("frame.cursor.lease_accepted invalid", format_error=True)
+        if (not isinstance(cursor["safety_checks"], list) or
+                not all(isinstance(value, bool) for value in cursor["safety_checks"])):
+            _error("frame.cursor.safety_checks invalid", format_error=True)
+        if len(cursor["safety_checks"]) > MAX_TRACE_READS:
+            _error("frame.cursor.safety_checks exceeds bounds", format_error=True)
         motion = frame.get("motion")
         if motion is not None:
             _exact_keys(motion, _MOTION_KEYS, "frame.motion", format_error=True)
@@ -1077,6 +1112,17 @@ class _ReplayCursor:
         self._deadline = deadline
         return True
 
+    def check_freshness(self, value):
+        if self.driver.current is None:
+            return False
+        expected = self.driver.current["expected"]["cursor"]["safety_checks"]
+        index = self.driver.current["safety_index"]
+        accepted = expected[index] if index < len(expected) else False
+        if not accepted:
+            self._active = False
+            self._deadline = 0.0
+        return accepted
+
     def start(self):
         return None
 
@@ -1134,11 +1180,13 @@ class _ReplayDriver:
             "reads": [],
             "active_reads": [],
             "lease_accepted": None,
+            "safety_checks": [],
             "volume_reads": [],
             "volume_sets": [],
             "cv_index": 0,
             "read_index": 0,
             "active_index": 0,
+            "safety_index": 0,
             "volume_read_index": 0,
             "volume_set_index": 0,
         }
@@ -1228,6 +1276,11 @@ class _ReplayDriver:
         if self.current is not None:
             self.current["lease_accepted"] = bool(accepted)
 
+    def _record_safety_check(self, accepted):
+        if self.current is not None:
+            self.current["safety_checks"].append(bool(accepted))
+            self.current["safety_index"] += 1
+
     def cursor_position(self, fallback):
         if self.current is None:
             return tuple(fallback)
@@ -1314,6 +1367,8 @@ class _ReplayDriver:
                 self.mismatches.append(f"frame {frame_index}: cursor active mismatch")
             if self.current["lease_accepted"] != expected["cursor"]["lease_accepted"]:
                 self.mismatches.append(f"frame {frame_index}: cursor lease mismatch")
+            if self.current["safety_checks"] != expected["cursor"]["safety_checks"]:
+                self.mismatches.append(f"frame {frame_index}: cursor safety mismatch")
             if not _same(self.current["volume_reads"], expected["volume_reads"]):
                 self.mismatches.append(f"frame {frame_index}: volume read mismatch")
             if not _same(self.current["volume_sets"], expected["volume_sets"]):
@@ -1326,6 +1381,8 @@ class _ReplayDriver:
                 self.mismatches.append(f"frame {frame_index}: cursor read count mismatch")
             if self.current["active_index"] != len(expected["cursor"]["active_reads"]):
                 self.mismatches.append(f"frame {frame_index}: cursor active count mismatch")
+            if self.current["safety_index"] != len(expected["cursor"]["safety_checks"]):
+                self.mismatches.append(f"frame {frame_index}: cursor safety count mismatch")
         self.modes.append(getattr(session, "gesture_mode", None))
         self.index += 1
         self.current = None

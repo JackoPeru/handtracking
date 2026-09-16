@@ -186,7 +186,7 @@ class RuntimeSession:
                 camera_target_fps=int(getattr(camera, "target_fps", 0)),
                 settings=settings if settings is not None else RuntimeSettings(),
             )
-        except Exception:
+        except BaseException:
             _close_resources(worker, cursor, camera)
             raise
 

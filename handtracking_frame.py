@@ -40,8 +40,6 @@ from handtracking_windows import (
 class FrameProcessResult:
     processed: bool
     skip_frame: bool = False
-
-
 def process_mediapipe_packet(
     session,
     packet,
@@ -57,11 +55,25 @@ def process_mediapipe_packet(
     left_click_cb=left_click,
     get_volume_cb=get_system_volume,
     set_volume_cb=set_system_volume,
+    output_allowed_cb=None,
 ):
     if mp_result_stale:
         return FrameProcessResult(False)
     if packet is None or packet[0] == session.latest_result_seq:
         return FrameProcessResult(False)
+
+    def gated(callback, blocked_result=None):
+        def call(*args, **kwargs):
+            if output_allowed_cb is not None and not output_allowed_cb():
+                return blocked_result
+            return callback(*args, **kwargs)
+        return call
+
+    ctrl_wheel_cb = gated(ctrl_wheel_cb, False)
+    execute_radial_action_cb = gated(execute_radial_action_cb, False)
+    left_click_cb = gated(left_click_cb, False)
+    get_volume_cb = gated(get_volume_cb, session.volume.level)
+    set_volume_cb = gated(set_volume_cb, False)
 
     (session.latest_result_seq, session.latest_result, result_gray,
      mp_infer_ms, mp_worker_ms, mp_cycle_ms, mp_queue_ms) = packet
@@ -173,6 +185,7 @@ def process_mediapipe_packet(
         volume_candidate_now=mode_metrics.volume_candidate_now,
         now=now,
         left_click_cb=left_click_cb,
+        output_allowed_cb=output_allowed_cb,
     )
 
     process_volume_scroll(

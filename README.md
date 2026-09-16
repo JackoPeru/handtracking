@@ -84,6 +84,12 @@ Test logici senza webcam: `python -m unittest discover -s tests -v`.
 
 Benchmark hot path: `python -m benchmarks.hotpath_benchmark`.
 
+Checklist hardware manuale prima di una release: selezionare la camera prevista;
+verificare gate Spock ON/OFF, puntatore e click, scroll e swipe, volume, zoom a due
+mani, disconnessione webcam e stallo tracking. Registrare esito e dispositivo usato.
+Finche' questa checklist non viene eseguita, test sintetici e CI non costituiscono
+acceptance webcam/Win32/audio/display.
+
 Ottimizzazioni runtime principali:
 
 - optical flow LK eseguito solo quando pointer/scroll/swipe possono consumarlo;

@@ -25,6 +25,7 @@ VK_LWIN = 0x5B
 VK_D = 0x44
 VK_BROWSER_BACK = 0xA6
 VK_BROWSER_FORWARD = 0xA7
+MAX_WINDOW_TITLE_CHARS = 4096
 
 
 class POINT(ctypes.Structure):
@@ -155,6 +156,10 @@ def foreground_window_title(user32=None):
     if not hwnd:
         return "?"
     length = api.GetWindowTextLengthW(hwnd)
+    try:
+        length = max(0, min(int(length), MAX_WINDOW_TITLE_CHARS))
+    except (TypeError, ValueError, OverflowError):
+        length = 0
     buf = ctypes.create_unicode_buffer(max(length + 1, 2))
     api.GetWindowTextW(hwnd, buf, len(buf))
     return buf.value or "?"
@@ -382,6 +387,29 @@ class CursorController:
                 return False
             self._input_time = frame_ready_at
             return True
+
+    def check_freshness(self, input_at):
+        try:
+            input_at = float(input_at)
+        except (TypeError, ValueError, OverflowError):
+            self._fail_closed()
+            return False
+        if not math.isfinite(input_at):
+            self._fail_closed()
+            return False
+        with self._lock:
+            now = self._clock_value()
+            valid = (
+                now is not None and
+                self._freshness_input_at == input_at and
+                self._freshness_deadline is not None and
+                now < self._freshness_deadline
+            )
+            if not valid:
+                self._active = False
+                self._freshness_deadline = 0.0
+                self._freshness_input_at = None
+            return valid
 
     def sync(self, active):
         active = bool(active)

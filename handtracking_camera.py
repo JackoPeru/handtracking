@@ -97,7 +97,7 @@ class CameraRuntime:
     def read_frame(self):
         ok, frame = self.capture.read()
         if not ok:
-            return None
+            raise RuntimeError("Lettura frame webcam fallita")
         return self.cv2_module.flip(frame, 1)
 
     def prepare_detection(self, frame):
